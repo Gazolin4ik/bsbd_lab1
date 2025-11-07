@@ -11,10 +11,10 @@ docker compose up -d
 
 ### 2. Запуск тестов
 ```bash
-# Тесты безопасности (задания 1-3)
+# Тесты безопасности 
 ./run_tests.sh 
 
-# Тесты логирования подключений (задание 4)
+# Тесты логирования подключений 
 ./run_tests.sh login
 ```
 
@@ -27,8 +27,8 @@ docker compose up -d
 
 - `docker-compose.yml` - конфигурация Docker (PostgreSQL + pgAdmin)
 - `init.sql` - инициализация базы данных (схемы, таблицы, роли, права)
-- `test_security_complete.sql` - тесты безопасности (задания 1-3)
-- `test_login_logging_complete.sql` - тесты логирования подключений (задание 4)
+- `test_security_complete.sql` - тесты безопасности 
+- `test_login_logging_complete.sql` - тесты логирования подключений 
 - `run_tests.sh` - скрипт запуска тестов
 
 ## Архитектура
