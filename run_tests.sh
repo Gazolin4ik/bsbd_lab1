@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Скрипт запуска тестов безопасности БД
+# Использование:
+#   ./run_tests.sh           - запустить тесты безопасности (задания 1-3)
+#   ./run_tests.sh login     - запустить тесты логирования (задание 4)
+
+TEST_TYPE=${1:-security}
+
+if [ "$TEST_TYPE" = "security" ]; then
+    echo "=========================================="
+    echo "ТЕСТЫ БЕЗОПАСНОСТИ (Задания 1-3)"
+    echo "=========================================="
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_security_fixed.sql 2>&1 | grep -E "(ТЕСТ|ПРОЙДЕН|ОШИБКА)" | sed 's/^psql:.*NOTICE:  //'
+    echo ""
+elif [ "$TEST_TYPE" = "login" ]; then
+    echo "=========================================="
+    echo "ТЕСТЫ ЛОГИРОВАНИЯ ПОДКЛЮЧЕНИЙ (Задание 4)"
+    echo "=========================================="
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_login_logging_complete.sql 2>&1 | grep -E "(ТЕСТ|ПРОЙДЕН|ОШИБКА)" | sed 's/^psql:.*NOTICE:  //'
+    echo ""
+else
+    echo "Использование:"
+    echo "  ./run_tests.sh           - тесты безопасности (задания 1-3)"
+    echo "  ./run_tests.sh login     - тесты логирования (задание 4)"
+    exit 1
+fi
+
+echo "=========================================="
+echo "ИНФОРМАЦИЯ ДЛЯ ПОДКЛЮЧЕНИЯ"
+echo "=========================================="
+echo "PGAdmin: http://localhost:8080 | БД: localhost:5433"
+echo "Пользователи: anna_ivanova/petr_smirnov/maria_petrova | Пароли: anna123/petr123/maria123"
