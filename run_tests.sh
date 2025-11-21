@@ -25,6 +25,11 @@ elif [ "$TEST_TYPE" = "lab2" ]; then
     echo "=========================================="
     docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_lab2_security.sql 2>&1 | grep -E "(ТЕСТ|ПРОЙДЕН|ОШИБКА)" | sed 's/^psql:.*NOTICE:  //'
     echo ""
+    echo "------------------------------------------"
+    echo "ДОПОЛНИТЕЛЬНЫЕ ТЕСТЫ ЧУВСТВИТЕЛЬНЫХ ФУНКЦИЙ"
+    echo "------------------------------------------"
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_sensitive_functions.sql 2>&1 | grep -E "(Функция|ОШИБКА|ПРОЙДЕН)" | sed 's/^psql:.*NOTICE:  //'
+    echo ""
 else
     echo "Использование:"
     echo "  ./run_tests.sh           - тесты безопасности (задания 1-3)"

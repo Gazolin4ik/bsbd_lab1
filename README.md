@@ -89,7 +89,7 @@ docker compose up -d
   ```
 
 ### Тесты ЛР2
-Скрипт `test_lab2_security.sql` покрывает 9 кейсов:
+Скрипты `test_lab2_security.sql` и `test_sensitive_functions.sql` покрывают 9+ сценариев:
 - чтение разрешённых таблиц
 - запрет прямых INSERT/DDL/DML в audit
 - вызовы SECURITY DEFINER с валидными/невалидными данными
