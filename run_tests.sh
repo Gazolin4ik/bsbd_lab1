@@ -19,10 +19,17 @@ elif [ "$TEST_TYPE" = "login" ]; then
     echo "=========================================="
     docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_login_logging_complete.sql 2>&1 | grep -E "(ТЕСТ|ПРОЙДЕН|ОШИБКА)" | sed 's/^psql:.*NOTICE:  //'
     echo ""
+elif [ "$TEST_TYPE" = "lab2" ]; then
+    echo "=========================================="
+    echo "ТЕСТЫ ЛР2 (SECURITY DEFINER и контроль бизнес-логики)"
+    echo "=========================================="
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_lab2_security.sql 2>&1 | grep -E "(ТЕСТ|ПРОЙДЕН|ОШИБКА)" | sed 's/^psql:.*NOTICE:  //'
+    echo ""
 else
     echo "Использование:"
     echo "  ./run_tests.sh           - тесты безопасности (задания 1-3)"
     echo "  ./run_tests.sh login     - тесты логирования (задание 4)"
+    echo "  ./run_tests.sh lab2      - тесты SECURITY DEFINER и ролей (ЛР2)"
     exit 1
 fi
 

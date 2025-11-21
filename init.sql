@@ -156,7 +156,10 @@ CREATE TABLE app.shipments (
     price DECIMAL(10,2) NOT NULL,
     current_status VARCHAR(50) DEFAULT 'created',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_shipments_declared_vs_price CHECK (
+        declared_value IS NULL OR declared_value >= price
+    )
 );
 
 COMMENT ON TABLE app.shipments IS 'Почтовые отправления';
@@ -225,6 +228,19 @@ CREATE TABLE audit.data_changes (
 
 COMMENT ON TABLE audit.data_changes IS 'Аудит изменений данных';
 
+-- Журнал вызовов SECURITY DEFINER функций
+CREATE TABLE audit.function_calls (
+    id BIGSERIAL PRIMARY KEY,
+    call_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    function_name TEXT NOT NULL,
+    caller_role TEXT NOT NULL,
+    input_params JSONB,
+    success BOOLEAN NOT NULL,
+    error_message TEXT
+);
+
+COMMENT ON TABLE audit.function_calls IS 'Журнал вызовов SECURITY DEFINER функций';
+
 -- =============================================
 -- 7. ИНДЕКСЫ
 -- =============================================
@@ -238,10 +254,76 @@ CREATE INDEX idx_operations_shipment ON app.shipment_operations(shipment_id);
 CREATE INDEX idx_employees_office ON app.employees(office_id);
 CREATE INDEX idx_users_email ON app.users(email);
 CREATE INDEX idx_users_phone ON app.users(phone);
+CREATE INDEX idx_function_calls_name ON audit.function_calls(function_name);
+CREATE INDEX idx_function_calls_caller ON audit.function_calls(caller_role);
+
+-- =============================================
+-- 8. ТРИГГЕРЫ КОНТРОЛЯ БИЗНЕС-ПРАВИЛ
+-- =============================================
+
+CREATE OR REPLACE FUNCTION app.enforce_shipment_weight_limit()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = app, public
+AS $$
+DECLARE
+    v_max_weight NUMERIC;
+BEGIN
+    SELECT max_weight INTO v_max_weight
+    FROM ref.shipment_types
+    WHERE id = NEW.shipment_type_id;
+
+    IF v_max_weight IS NOT NULL AND NEW.weight > v_max_weight THEN
+        RAISE EXCEPTION USING MESSAGE = format(
+            'Вес %s превышает лимит %s для типа %s',
+            NEW.weight::TEXT, v_max_weight::TEXT, NEW.shipment_type_id::TEXT
+        );
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION app.enforce_shipment_weight_limit()
+IS 'Проверка веса отправления относительно лимита типа (CHECK vs Trigger сравнение)';
+
+CREATE TRIGGER trg_shipments_weight_limit
+BEFORE INSERT OR UPDATE OF weight, shipment_type_id
+ON app.shipments
+FOR EACH ROW
+EXECUTE FUNCTION app.enforce_shipment_weight_limit();
 
 -- =============================================
 -- 8. ФУНКЦИИ
 -- =============================================
+
+-- Унифицированное логирование SECURITY DEFINER функций
+CREATE OR REPLACE FUNCTION audit.log_function_call(
+    p_function_name TEXT,
+    p_input_params JSONB,
+    p_success BOOLEAN,
+    p_error_message TEXT DEFAULT NULL,
+    p_caller_role TEXT DEFAULT NULL
+)
+RETURNS void
+SECURITY DEFINER
+SET search_path = audit, public
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO audit.function_calls (function_name, caller_role, input_params, success, error_message)
+    VALUES (
+        p_function_name,
+        COALESCE(p_caller_role, session_user),
+        p_input_params,
+        p_success,
+        p_error_message
+    );
+END;
+$$;
+
+COMMENT ON FUNCTION audit.log_function_call(TEXT, JSONB, BOOLEAN, TEXT, TEXT)
+IS 'Фиксация вызовов SECURITY DEFINER функций с указанием вызывающей роли и входных параметров';
 
 -- Функция получения ID сотрудника
 CREATE OR REPLACE FUNCTION app.get_current_employee_id()
@@ -505,7 +587,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT USAGE ON SEQUENCES TO office_manage
 -- Права на функции
 GRANT EXECUTE ON FUNCTION public.log_user_login() TO office_manager, office_operator, audit_viewer;
 GRANT EXECUTE ON FUNCTION public.on_connect() TO office_manager, office_operator, audit_viewer;
-
 -- Настройка автоматического логирования подключений
 -- Для каждого пользователя устанавливаем автоматический вызов функции при подключении
 -- Используем ALTER ROLE для установки функции, которая будет вызываться при подключении
@@ -531,19 +612,29 @@ ALTER TABLE app.delivery_routes FORCE ROW LEVEL SECURITY;
 
 -- Политики RLS
 CREATE POLICY users_select_policy ON app.users
-    FOR SELECT USING (app.check_employee_access_level(2));
+    FOR SELECT USING (
+        current_user <> session_user
+        OR app.check_employee_access_level(2)
+    );
 
 CREATE POLICY employees_office_policy ON app.employees
-    FOR SELECT USING (office_id = app.get_current_employee_office_id());
+    FOR SELECT USING (
+        current_user <> session_user
+        OR office_id = app.get_current_employee_office_id()
+    );
 
 CREATE POLICY shipments_office_policy ON app.shipments
     FOR ALL USING (
-        from_office_id = app.get_current_employee_office_id()
+        current_user <> session_user
+        OR from_office_id = app.get_current_employee_office_id()
         OR to_office_id = app.get_current_employee_office_id()
     );
 
 CREATE POLICY routes_office_policy ON app.delivery_routes
-    FOR ALL USING (office_id = app.get_current_employee_office_id());
+    FOR ALL USING (
+        current_user <> session_user
+        OR office_id = app.get_current_employee_office_id()
+    );
 
 -- =============================================
 -- 12. АВТОМАТИЧЕСКОЕ ЛОГИРОВАНИЕ ПОДКЛЮЧЕНИЙ
@@ -590,6 +681,282 @@ BEGIN
     PERFORM public.session_start_log();
 END;
 $$;
+
+-- =============================================
+-- SECURITY DEFINER ФУНКЦИИ ДЛЯ ЛР2
+-- =============================================
+
+CREATE OR REPLACE FUNCTION app.secure_create_shipment(
+    p_tracking_number TEXT,
+    p_from_office_id INTEGER,
+    p_to_office_id INTEGER,
+    p_sender_id INTEGER,
+    p_recipient_id INTEGER,
+    p_shipment_type_id INTEGER,
+    p_weight NUMERIC,
+    p_declared_value NUMERIC,
+    p_price NUMERIC
+)
+RETURNS INTEGER
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_shipment_id INTEGER;
+    v_max_weight NUMERIC;
+    v_input JSONB := jsonb_strip_nulls(
+        jsonb_build_object(
+            'tracking_number', p_tracking_number,
+            'from_office_id', p_from_office_id,
+            'to_office_id', p_to_office_id,
+            'shipment_type_id', p_shipment_type_id,
+            'weight', p_weight,
+            'price', p_price
+        )
+    );
+BEGIN
+    BEGIN
+        IF p_tracking_number IS NULL OR length(trim(p_tracking_number)) < 5 THEN
+            RAISE EXCEPTION USING MESSAGE = 'Номер отслеживания должен содержать минимум 5 символов';
+        END IF;
+
+        IF p_from_office_id = p_to_office_id THEN
+            RAISE EXCEPTION USING MESSAGE = 'Отправляющее и получающее отделения должны различаться';
+        END IF;
+
+        IF p_weight IS NULL OR p_weight <= 0 THEN
+            RAISE EXCEPTION USING MESSAGE = 'Вес отправления должен быть больше нуля';
+        END IF;
+
+        IF p_price IS NULL OR p_price <= 0 THEN
+            RAISE EXCEPTION USING MESSAGE = 'Стоимость услуги должна быть больше нуля';
+        END IF;
+
+        IF p_declared_value IS NOT NULL AND p_declared_value < p_price THEN
+            RAISE EXCEPTION USING MESSAGE = 'Объявленная стоимость не может быть меньше фактической стоимости услуги';
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM app.offices WHERE id = p_from_office_id) THEN
+            RAISE EXCEPTION USING MESSAGE = format('Отделение-отправитель %s не найдено', p_from_office_id);
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM app.offices WHERE id = p_to_office_id) THEN
+            RAISE EXCEPTION USING MESSAGE = format('Отделение-получатель %s не найдено', p_to_office_id);
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM app.users WHERE id = p_sender_id) THEN
+            RAISE EXCEPTION USING MESSAGE = format('Отправитель %s не найден', p_sender_id);
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM app.users WHERE id = p_recipient_id) THEN
+            RAISE EXCEPTION USING MESSAGE = format('Получатель %s не найден', p_recipient_id);
+        END IF;
+
+        SELECT max_weight INTO v_max_weight
+        FROM ref.shipment_types
+        WHERE id = p_shipment_type_id;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING MESSAGE = format('Тип отправления %s не найден', p_shipment_type_id);
+        END IF;
+
+        IF v_max_weight IS NOT NULL AND p_weight > v_max_weight THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Вес %s превышает допустимый предел %s для типа %s',
+                p_weight::TEXT, v_max_weight::TEXT, p_shipment_type_id::TEXT
+            );
+        END IF;
+
+        INSERT INTO app.shipments (
+            tracking_number,
+            from_office_id,
+            to_office_id,
+            sender_id,
+            recipient_id,
+            shipment_type_id,
+            weight,
+            declared_value,
+            price
+        )
+        VALUES (
+            p_tracking_number,
+            p_from_office_id,
+            p_to_office_id,
+            p_sender_id,
+            p_recipient_id,
+            p_shipment_type_id,
+            p_weight,
+            p_declared_value,
+            p_price
+        )
+        RETURNING id INTO v_shipment_id;
+
+        PERFORM audit.log_function_call(
+            'app.secure_create_shipment',
+            v_input,
+            true,
+            NULL,
+            session_user
+        );
+
+        RETURN v_shipment_id;
+    EXCEPTION
+        WHEN OTHERS THEN
+            PERFORM audit.log_function_call(
+                'app.secure_create_shipment',
+                v_input,
+                false,
+                SQLERRM,
+                session_user
+            );
+            RAISE;
+    END;
+END;
+$$;
+
+COMMENT ON FUNCTION app.secure_create_shipment(
+    TEXT, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, NUMERIC, NUMERIC, NUMERIC
+) IS 'Создание отправления с повышенными привилегиями и валидацией входных данных';
+
+CREATE OR REPLACE FUNCTION app.secure_update_shipment_status(
+    p_tracking_number TEXT,
+    p_new_status TEXT,
+    p_comment TEXT DEFAULT NULL
+)
+RETURNS VOID
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_allowed_statuses CONSTANT TEXT[] := ARRAY[
+        'created', 'accepted', 'in_transit', 'arrived', 'delivered', 'cancelled', 'returned'
+    ];
+    v_input JSONB := jsonb_strip_nulls(
+        jsonb_build_object(
+            'tracking_number', p_tracking_number,
+            'new_status', p_new_status
+        )
+    );
+BEGIN
+    BEGIN
+        IF p_new_status IS NULL OR NOT (p_new_status = ANY (v_allowed_statuses)) THEN
+            RAISE EXCEPTION USING MESSAGE = format('Недопустимый статус отправления: %s', p_new_status);
+        END IF;
+
+        UPDATE app.shipments
+        SET current_status = p_new_status,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE tracking_number = p_tracking_number;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING MESSAGE = format('Отправление %s не найдено', p_tracking_number);
+        END IF;
+
+        PERFORM audit.log_function_call(
+            'app.secure_update_shipment_status',
+            v_input,
+            true,
+            NULL,
+            session_user
+        );
+    EXCEPTION
+        WHEN OTHERS THEN
+            PERFORM audit.log_function_call(
+                'app.secure_update_shipment_status',
+                v_input,
+                false,
+                SQLERRM,
+                session_user
+            );
+            RAISE;
+    END;
+END;
+$$;
+
+COMMENT ON FUNCTION app.secure_update_shipment_status(TEXT, TEXT, TEXT)
+IS 'Безопасное обновление статуса отправления с журналированием';
+
+CREATE OR REPLACE FUNCTION app.secure_adjust_declared_value(
+    p_tracking_number TEXT,
+    p_new_declared_value NUMERIC
+)
+RETURNS VOID
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_price NUMERIC;
+    v_input JSONB := jsonb_strip_nulls(
+        jsonb_build_object(
+            'tracking_number', p_tracking_number,
+            'new_declared_value', p_new_declared_value
+        )
+    );
+BEGIN
+    BEGIN
+        IF p_new_declared_value IS NULL OR p_new_declared_value <= 0 THEN
+            RAISE EXCEPTION USING MESSAGE = 'Объявленная стоимость должна быть положительным числом';
+        END IF;
+
+        SELECT price INTO v_price
+        FROM app.shipments
+        WHERE tracking_number = p_tracking_number
+        FOR UPDATE;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING MESSAGE = format('Отправление %s не найдено', p_tracking_number);
+        END IF;
+
+        IF p_new_declared_value < v_price THEN
+            RAISE EXCEPTION USING MESSAGE = 'Объявленная стоимость не может быть меньше фактической стоимости услуги';
+        END IF;
+
+        UPDATE app.shipments
+        SET declared_value = p_new_declared_value,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE tracking_number = p_tracking_number;
+
+        PERFORM audit.log_function_call(
+            'app.secure_adjust_declared_value',
+            v_input,
+            true,
+            NULL,
+            session_user
+        );
+    EXCEPTION
+        WHEN OTHERS THEN
+            PERFORM audit.log_function_call(
+                'app.secure_adjust_declared_value',
+                v_input,
+                false,
+                SQLERRM,
+                session_user
+            );
+            RAISE;
+    END;
+END;
+$$;
+
+COMMENT ON FUNCTION app.secure_adjust_declared_value(TEXT, NUMERIC)
+IS 'Контролируемое изменение объявленной стоимости отправления';
+
+REVOKE ALL ON FUNCTION app.secure_create_shipment(
+    TEXT, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, NUMERIC, NUMERIC, NUMERIC
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.secure_update_shipment_status(TEXT, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.secure_adjust_declared_value(TEXT, NUMERIC) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION app.secure_create_shipment(
+    TEXT, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, NUMERIC, NUMERIC, NUMERIC
+) TO office_operator, office_manager, dml_admin;
+GRANT EXECUTE ON FUNCTION app.secure_update_shipment_status(TEXT, TEXT, TEXT)
+    TO office_manager, dml_admin;
+GRANT EXECUTE ON FUNCTION app.secure_adjust_declared_value(TEXT, NUMERIC)
+    TO office_manager, dml_admin;
+GRANT SELECT ON audit.function_calls TO auditor, audit_viewer;
 
 -- Логируем создание БД
 SELECT public.log_user_login();

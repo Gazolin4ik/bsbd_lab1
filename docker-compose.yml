@@ -12,6 +12,8 @@ services:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
       - ./test_security_complete.sql:/test_security_fixed.sql
       - ./test_login_logging_complete.sql:/test_login_logging_complete.sql
+      - ./test_lab2_security.sql:/test_lab2_security.sql
+      - ./lab2_rule_benchmark.sql:/lab2_rule_benchmark.sql
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
