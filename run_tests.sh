@@ -30,11 +30,20 @@ elif [ "$TEST_TYPE" = "lab2" ]; then
     echo "------------------------------------------"
     docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_sensitive_functions.sql 2>&1 | grep -E "(Функция|ОШИБКА|ПРОЙДЕН)" | sed 's/^psql:.*NOTICE:  //'
     echo ""
+elif [ "$TEST_TYPE" = "lab3" ]; then
+    echo "=========================================="
+    echo "ТЕСТЫ ЛР3 (Построчная изоляция данных с RLS)"
+    echo "=========================================="
+    # Выдаем права перед запуском тестов
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /fix_all_permissions.sh > /dev/null 2>&1 || true
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /test_lab3_rls.sql 2>&1 | grep -E "(ТЕСТ|ПРОЙДЕН|ОШИБКА)" | sed 's/^psql:.*NOTICE:  //' | sed 's/^NOTICE:  //'
+    echo ""
 else
     echo "Использование:"
     echo "  ./run_tests.sh           - тесты безопасности (задания 1-3)"
     echo "  ./run_tests.sh login     - тесты логирования (задание 4)"
     echo "  ./run_tests.sh lab2      - тесты SECURITY DEFINER и ролей (ЛР2)"
+    echo "  ./run_tests.sh lab3      - тесты построчной изоляции данных с RLS (ЛР3)"
     exit 1
 fi
 

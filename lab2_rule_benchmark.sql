@@ -59,7 +59,7 @@ BEGIN
            GREATEST(0.01, COALESCE(st.max_weight, 10) * (0.1 + random() * 0.9)),
            500 + random()*500,
            100 + random()*200
-    FROM ref.shipment_types st, generate_series(1, 2500);
+    FROM ref.shipment_types st, generate_series(1, 250000);
     RAISE NOTICE 'CHECK constraint insert duration: %', clock_timestamp() - v_start;
 
     v_start := clock_timestamp();
@@ -68,7 +68,7 @@ BEGIN
            GREATEST(0.01, COALESCE(st.max_weight, 10) * (0.1 + random() * 0.9)),
            500 + random()*500,
            100 + random()*200
-    FROM ref.shipment_types st, generate_series(1, 2500);
+    FROM ref.shipment_types st, generate_series(1, 250000);
     RAISE NOTICE 'Trigger validation insert duration: %', clock_timestamp() - v_start;
 END;
 $$;

@@ -15,6 +15,7 @@ services:
       - ./test_lab2_security.sql:/test_lab2_security.sql
       - ./lab2_rule_benchmark.sql:/lab2_rule_benchmark.sql
       - ./test_sensitive_functions.sql:/test_sensitive_functions.sql
+      - ./test_lab3_rls.sql:/test_lab3_rls.sql
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]

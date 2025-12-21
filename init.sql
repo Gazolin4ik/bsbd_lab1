@@ -54,17 +54,21 @@ CREATE ROLE audit_viewer NOLOGIN;
 DROP ROLE IF EXISTS "anna_ivanova";
 DROP ROLE IF EXISTS "petr_smirnov";
 DROP ROLE IF EXISTS "maria_petrova";
+DROP ROLE IF EXISTS "auditor_login";
 
 -- Создаем логин-пользователей (латинскими буквами чтобы избежать проблем)
 CREATE ROLE anna_ivanova LOGIN PASSWORD 'anna123';
 CREATE ROLE petr_smirnov LOGIN PASSWORD 'petr123';
 CREATE ROLE maria_petrova LOGIN PASSWORD 'maria123';
+CREATE ROLE auditor_login LOGIN PASSWORD 'auditor123';
 
 -- Назначаем роли
 GRANT office_manager TO anna_ivanova;
 GRANT office_operator TO petr_smirnov;
 GRANT office_operator TO maria_petrova;
-GRANT audit_viewer TO anna_ivanova, petr_smirnov, maria_petrova;
+-- Убрано: GRANT audit_viewer TO anna_ivanova, petr_smirnov, maria_petrova;
+-- Пользователи не должны иметь роль audit_viewer, так как она наследует auditor и нарушает изоляцию RLS
+GRANT auditor TO auditor_login;
 
 -- Права на подключение
 GRANT CONNECT ON DATABASE bsbd_lab1 TO anna_ivanova, petr_smirnov, maria_petrova;
@@ -197,10 +201,12 @@ CREATE TABLE app.user_mappings (
     id SERIAL PRIMARY KEY,
     db_username VARCHAR(100) NOT NULL UNIQUE,
     employee_id INTEGER NOT NULL REFERENCES app.employees(id),
+    segment_id INTEGER, -- FK будет добавлен позже в ЛР3
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE app.user_mappings IS 'Соответствие пользователей БД и сотрудников';
+COMMENT ON COLUMN app.user_mappings.segment_id IS 'Сегмент изоляции пользователя (кэш для избежания рекурсии в RLS)';
 
 -- Таблица аудита подключений
 CREATE TABLE audit.login_log (
@@ -516,6 +522,7 @@ INSERT INTO app.shipment_operations (shipment_id, employee_id, operation_type, l
 (3, 4, 'прием', 'SPB001', 'Заказное письмо принято');
 
 -- Соответствия пользователей
+-- segment_id будет заполнен позже в разделе ЛР3 после добавления segment_id в employees
 INSERT INTO app.user_mappings (db_username, employee_id) VALUES
 ('anna_ivanova', 1),
 ('petr_smirnov', 2),
@@ -595,46 +602,542 @@ ALTER ROLE petr_smirnov SET search_path = app, public;
 ALTER ROLE maria_petrova SET search_path = app, public;
 
 -- =============================================
--- 11. ROW LEVEL SECURITY
+-- 11. ЛАБОРАТОРНАЯ РАБОТА №3: ПОСТРОЧНАЯ ИЗОЛЯЦИЯ ДАННЫХ С RLS
 -- =============================================
 
--- Включаем RLS
+-- =============================================
+-- 11.1. ПОДГОТОВКА СЕГМЕНТАЦИИ
+-- =============================================
+
+-- Создаем справочник сегментов (филиалов/отделений)
+CREATE TABLE ref.segments (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(20) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+COMMENT ON TABLE ref.segments IS 'Справочник сегментов для построчной изоляции данных (филиалы/отделения)';
+
+-- Добавляем FK для user_mappings.segment_id (если еще не добавлен)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'fk_user_mappings_segment'
+    ) THEN
+        ALTER TABLE app.user_mappings 
+        ADD CONSTRAINT fk_user_mappings_segment 
+        FOREIGN KEY (segment_id) REFERENCES ref.segments(id);
+    END IF;
+END $$;
+
+-- Добавляем segment_id в таблицу offices
+ALTER TABLE app.offices ADD COLUMN segment_id INTEGER REFERENCES ref.segments(id);
+COMMENT ON COLUMN app.offices.segment_id IS 'Сегмент изоляции для отделения';
+
+-- Добавляем segment_id в ключевые таблицы app.*
+ALTER TABLE app.users ADD COLUMN segment_id INTEGER REFERENCES ref.segments(id);
+COMMENT ON COLUMN app.users.segment_id IS 'Сегмент изоляции для пользователя';
+
+ALTER TABLE app.employees ADD COLUMN segment_id INTEGER REFERENCES ref.segments(id);
+COMMENT ON COLUMN app.employees.segment_id IS 'Сегмент изоляции для сотрудника';
+
+ALTER TABLE app.shipments ADD COLUMN segment_id INTEGER REFERENCES ref.segments(id);
+COMMENT ON COLUMN app.shipments.segment_id IS 'Сегмент изоляции для отправления (сегмент отделения-отправителя)';
+
+ALTER TABLE app.delivery_routes ADD COLUMN segment_id INTEGER REFERENCES ref.segments(id);
+COMMENT ON COLUMN app.delivery_routes.segment_id IS 'Сегмент изоляции для маршрута (сегмент отделения)';
+
+ALTER TABLE app.shipment_operations ADD COLUMN segment_id INTEGER REFERENCES ref.segments(id);
+COMMENT ON COLUMN app.shipment_operations.segment_id IS 'Сегмент изоляции для операции (сегмент сотрудника)';
+
+-- Создаем индексы для условий политик RLS (segment_id + ключи фильтрации)
+CREATE INDEX idx_offices_segment ON app.offices(segment_id);
+CREATE INDEX idx_users_segment ON app.users(segment_id);
+CREATE INDEX idx_employees_segment ON app.employees(segment_id);
+CREATE INDEX idx_employees_segment_office ON app.employees(segment_id, office_id);
+CREATE INDEX idx_shipments_segment ON app.shipments(segment_id);
+CREATE INDEX idx_shipments_segment_from_office ON app.shipments(segment_id, from_office_id);
+CREATE INDEX idx_shipments_segment_to_office ON app.shipments(segment_id, to_office_id);
+CREATE INDEX idx_delivery_routes_segment ON app.delivery_routes(segment_id);
+CREATE INDEX idx_delivery_routes_segment_office ON app.delivery_routes(segment_id, office_id);
+CREATE INDEX idx_shipment_operations_segment ON app.shipment_operations(segment_id);
+CREATE INDEX idx_shipment_operations_segment_employee ON app.shipment_operations(segment_id, employee_id);
+
+-- Заполняем справочник сегментов
+INSERT INTO ref.segments (code, name, description) VALUES
+('MOSCOW', 'Филиал Москва', 'Сегмент московских отделений'),
+('SPB', 'Филиал Санкт-Петербург', 'Сегмент петербургских отделений'),
+('NOVOSIBIRSK', 'Филиал Новосибирск', 'Сегмент новосибирских отделений');
+
+-- Обновляем segment_id для существующих offices на основе адреса
+UPDATE app.offices SET segment_id = 1 WHERE office_number LIKE 'MOS%';
+UPDATE app.offices SET segment_id = 2 WHERE office_number LIKE 'SPB%';
+UPDATE app.offices SET segment_id = 3 WHERE office_number LIKE 'NOV%';
+
+-- Обновляем segment_id для employees на основе их office_id
+UPDATE app.employees e
+SET segment_id = o.segment_id
+FROM app.offices o
+WHERE e.office_id = o.id;
+
+-- Обновляем segment_id для user_mappings на основе employee_id
+UPDATE app.user_mappings um
+SET segment_id = e.segment_id
+FROM app.employees e
+WHERE um.employee_id = e.id;
+
+-- Обновляем segment_id для users (привязываем к сегменту первого отправления или создаем по умолчанию)
+UPDATE app.users u
+SET segment_id = (
+    SELECT o.segment_id
+    FROM app.shipments s
+    JOIN app.offices o ON s.from_office_id = o.id
+    WHERE s.sender_id = u.id OR s.recipient_id = u.id
+    LIMIT 1
+)
+WHERE segment_id IS NULL;
+
+-- Для пользователей без отправлений устанавливаем сегмент по умолчанию (Москва)
+UPDATE app.users SET segment_id = 1 WHERE segment_id IS NULL;
+
+-- Обновляем segment_id для shipments на основе from_office_id
+UPDATE app.shipments s
+SET segment_id = o.segment_id
+FROM app.offices o
+WHERE s.from_office_id = o.id;
+
+-- Обновляем segment_id для delivery_routes на основе office_id
+UPDATE app.delivery_routes dr
+SET segment_id = o.segment_id
+FROM app.offices o
+WHERE dr.office_id = o.id;
+
+-- Обновляем segment_id для shipment_operations на основе employee_id
+UPDATE app.shipment_operations so
+SET segment_id = e.segment_id
+FROM app.employees e
+WHERE so.employee_id = e.id;
+
+-- Делаем segment_id обязательным для новых записей
+ALTER TABLE app.offices ALTER COLUMN segment_id SET NOT NULL;
+ALTER TABLE app.users ALTER COLUMN segment_id SET NOT NULL;
+ALTER TABLE app.employees ALTER COLUMN segment_id SET NOT NULL;
+ALTER TABLE app.shipments ALTER COLUMN segment_id SET NOT NULL;
+ALTER TABLE app.delivery_routes ALTER COLUMN segment_id SET NOT NULL;
+ALTER TABLE app.shipment_operations ALTER COLUMN segment_id SET NOT NULL;
+ALTER TABLE app.user_mappings ALTER COLUMN segment_id SET NOT NULL;
+
+-- =============================================
+-- 11.2. ФУНКЦИЯ ПЕРЕДАЧИ КОНТЕКСТА
+-- =============================================
+
+-- Функция получения segment_id текущего пользователя из user_mappings
+CREATE OR REPLACE FUNCTION app.get_current_user_segment_id()
+RETURNS INTEGER
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_segment_id INTEGER;
+BEGIN
+    SELECT e.segment_id INTO v_segment_id
+    FROM app.user_mappings um
+    JOIN app.employees e ON um.employee_id = e.id
+    WHERE um.db_username = session_user;
+    
+    RETURN v_segment_id;
+END;
+$$;
+
+COMMENT ON FUNCTION app.get_current_user_segment_id()
+IS 'Получение segment_id текущего пользователя через user_mappings';
+
+-- SECURITY DEFINER функция set_session_ctx для установки контекста сегмента
+CREATE OR REPLACE FUNCTION app.set_session_ctx(
+    p_segment_id INTEGER,
+    p_actor_id INTEGER DEFAULT NULL
+)
+RETURNS void
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_user_segment_id INTEGER;
+    v_actual_user TEXT;
+BEGIN
+    -- В SECURITY DEFINER функции session_user - это реальный пользователь, который вызвал функцию
+    -- current_user - это владелец функции (postgres)
+    v_actual_user := session_user;
+    
+    -- Получаем segment_id пользователя из user_mappings
+    -- Используем прямую выборку, так как get_current_user_segment_id тоже SECURITY DEFINER
+    SELECT e.segment_id INTO v_user_segment_id
+    FROM app.user_mappings um
+    JOIN app.employees e ON um.employee_id = e.id
+    WHERE um.db_username = v_actual_user;
+    
+    -- Проверяем право роли на сегмент
+    -- Пользователь может работать только со своим сегментом
+    IF v_user_segment_id IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = format(
+            'Пользователь %s не привязан к сегменту',
+            v_actual_user
+        );
+    END IF;
+    
+    IF p_segment_id IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = 'segment_id не может быть NULL';
+    END IF;
+    
+    -- Проверяем, что пользователь имеет доступ к запрашиваемому сегменту
+    IF p_segment_id != v_user_segment_id THEN
+        -- Проверяем, является ли пользователь auditor (может видеть все сегменты)
+        -- В SECURITY DEFINER функции проверяем через pg_auth_members
+        IF NOT EXISTS (
+            SELECT 1 
+            FROM pg_roles r
+            JOIN pg_auth_members am ON r.oid = am.member
+            JOIN pg_roles auditor_role ON am.roleid = auditor_role.oid
+            WHERE r.rolname = v_actual_user
+            AND auditor_role.rolname = 'auditor'
+        ) THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Пользователь %s не имеет доступа к сегменту %s (его сегмент: %s)',
+                v_actual_user, p_segment_id, v_user_segment_id
+            );
+        END IF;
+    END IF;
+    
+    -- Устанавливаем GUC для текущей сессии
+    PERFORM set_config('app.segment_id', p_segment_id::TEXT, false);
+    
+    -- Если передан actor_id, устанавливаем и его
+    IF p_actor_id IS NOT NULL THEN
+        PERFORM set_config('app.actor_id', p_actor_id::TEXT, false);
+    END IF;
+END;
+$$;
+
+COMMENT ON FUNCTION app.set_session_ctx(INTEGER, INTEGER)
+IS 'Установка контекста сегмента для текущей сессии с проверкой прав доступа';
+
+-- Перегрузка функции с одним параметром (для удобства использования)
+CREATE OR REPLACE FUNCTION app.set_session_ctx(p_segment_id INTEGER)
+RETURNS void
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM app.set_session_ctx(p_segment_id, NULL);
+END;
+$$;
+
+COMMENT ON FUNCTION app.set_session_ctx(INTEGER)
+IS 'Установка контекста сегмента для текущей сессии (без actor_id)';
+
+-- =============================================
+-- 11.3. ВКЛЮЧЕНИЕ RLS И ПОЛИТИКИ
+-- =============================================
+
+-- Удаляем старые политики RLS если они существуют
+DROP POLICY IF EXISTS users_select_policy ON app.users;
+DROP POLICY IF EXISTS employees_office_policy ON app.employees;
+DROP POLICY IF EXISTS shipments_office_policy ON app.shipments;
+DROP POLICY IF EXISTS routes_office_policy ON app.delivery_routes;
+
+-- Включаем RLS на ключевых таблицах
+-- ВАЖНО: user_mappings и employees должны быть доступны для функции get_session_segment_id
+-- Поэтому employees имеет RLS, но функция использует SECURITY DEFINER для обхода политик
+ALTER TABLE app.offices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.employees ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.shipments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.delivery_routes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.shipment_operations ENABLE ROW LEVEL SECURITY;
+-- user_mappings не имеет RLS, так как это служебная таблица для определения segment_id
 
--- FORCE RLS
+-- FORCE RLS (запрещаем обход политик даже для владельцев)
+ALTER TABLE app.offices FORCE ROW LEVEL SECURITY;
 ALTER TABLE app.users FORCE ROW LEVEL SECURITY;
 ALTER TABLE app.employees FORCE ROW LEVEL SECURITY;
 ALTER TABLE app.shipments FORCE ROW LEVEL SECURITY;
 ALTER TABLE app.delivery_routes FORCE ROW LEVEL SECURITY;
+ALTER TABLE app.shipment_operations FORCE ROW LEVEL SECURITY;
 
--- Политики RLS
+-- Функция для получения segment_id из GUC или из user_mappings
+-- Важно: эта функция используется в политиках RLS, поэтому она должна быть STABLE
+-- Используем SECURITY INVOKER чтобы функция выполнялась с правами вызывающего пользователя
+-- segment_id хранится напрямую в user_mappings для избежания рекурсии
+CREATE OR REPLACE FUNCTION app.get_session_segment_id()
+RETURNS INTEGER
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET search_path = app, public
+AS $$
+DECLARE
+    v_segment_id INTEGER;
+    v_guc_value TEXT;
+BEGIN
+    -- Пытаемся получить из GUC
+    BEGIN
+        v_guc_value := current_setting('app.segment_id', true);
+        IF v_guc_value IS NOT NULL AND v_guc_value != '' THEN
+            v_segment_id := v_guc_value::INTEGER;
+            RETURN v_segment_id;
+        END IF;
+    EXCEPTION
+        WHEN OTHERS THEN
+            NULL;
+    END;
+    
+    -- Если GUC не установлен, получаем из user_mappings напрямую
+    -- Используем current_user для получения текущего пользователя в контексте политики
+    SELECT um.segment_id INTO v_segment_id
+    FROM app.user_mappings um
+    WHERE um.db_username = current_user;
+    
+    RETURN v_segment_id;
+END;
+$$;
+
+COMMENT ON FUNCTION app.get_session_segment_id()
+IS 'Получение segment_id из GUC или из user_mappings (резервный путь)';
+
+-- Дополнительная функция SECURITY INVOKER для использования в политиках
+CREATE OR REPLACE FUNCTION app.get_user_segment_id()
+RETURNS INTEGER
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT um.segment_id 
+    FROM app.user_mappings um 
+    WHERE um.db_username = current_user
+    LIMIT 1;
+$$;
+
+COMMENT ON FUNCTION app.get_user_segment_id()
+IS 'Получение segment_id текущего пользователя из user_mappings (для использования в политиках RLS)';
+
+-- Политики RLS для app.offices
+-- Используем подзапрос напрямую для надежной работы в контексте политики
+CREATE POLICY offices_select_policy ON app.offices
+    FOR SELECT USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY offices_insert_policy ON app.offices
+    FOR INSERT WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY offices_update_policy ON app.offices
+    FOR UPDATE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    ) WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY offices_delete_policy ON app.offices
+    FOR DELETE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+-- Политики RLS для app.users
+-- Используем подзапрос напрямую для надежной работы в контексте политики
 CREATE POLICY users_select_policy ON app.users
     FOR SELECT USING (
-        current_user <> session_user
-        OR app.check_employee_access_level(2)
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
     );
 
-CREATE POLICY employees_office_policy ON app.employees
+CREATE POLICY users_insert_policy ON app.users
+    FOR INSERT WITH CHECK (
+        pg_has_role(session_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY users_update_policy ON app.users
+    FOR UPDATE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    ) WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY users_delete_policy ON app.users
+    FOR DELETE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+-- Политики RLS для app.employees
+-- Используем подзапрос напрямую для надежной работы в контексте политики
+CREATE POLICY employees_select_policy ON app.employees
     FOR SELECT USING (
-        current_user <> session_user
-        OR office_id = app.get_current_employee_office_id()
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
     );
 
-CREATE POLICY shipments_office_policy ON app.shipments
-    FOR ALL USING (
-        current_user <> session_user
-        OR from_office_id = app.get_current_employee_office_id()
-        OR to_office_id = app.get_current_employee_office_id()
+CREATE POLICY employees_insert_policy ON app.employees
+    FOR INSERT WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
     );
 
-CREATE POLICY routes_office_policy ON app.delivery_routes
-    FOR ALL USING (
-        current_user <> session_user
-        OR office_id = app.get_current_employee_office_id()
+CREATE POLICY employees_update_policy ON app.employees
+    FOR UPDATE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    ) WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
     );
+
+CREATE POLICY employees_delete_policy ON app.employees
+    FOR DELETE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+-- Политики RLS для app.shipments
+-- Используем подзапрос напрямую для надежной работы в контексте политики
+CREATE POLICY shipments_select_policy ON app.shipments
+    FOR SELECT USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY shipments_insert_policy ON app.shipments
+    FOR INSERT WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY shipments_update_policy ON app.shipments
+    FOR UPDATE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    ) WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY shipments_delete_policy ON app.shipments
+    FOR DELETE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+-- Политики RLS для app.delivery_routes
+-- Используем подзапрос напрямую для надежной работы в контексте политики
+CREATE POLICY delivery_routes_select_policy ON app.delivery_routes
+    FOR SELECT USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY delivery_routes_insert_policy ON app.delivery_routes
+    FOR INSERT WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY delivery_routes_update_policy ON app.delivery_routes
+    FOR UPDATE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    ) WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY delivery_routes_delete_policy ON app.delivery_routes
+    FOR DELETE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+-- Политики RLS для app.shipment_operations
+-- Политики RLS для app.shipment_operations
+-- Используем подзапрос напрямую для надежной работы в контексте политики
+CREATE POLICY shipment_operations_select_policy ON app.shipment_operations
+    FOR SELECT USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY shipment_operations_insert_policy ON app.shipment_operations
+    FOR INSERT WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY shipment_operations_update_policy ON app.shipment_operations
+    FOR UPDATE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    ) WITH CHECK (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+CREATE POLICY shipment_operations_delete_policy ON app.shipment_operations
+    FOR DELETE USING (
+        pg_has_role(current_user, 'auditor', 'USAGE')
+        OR segment_id = app.get_user_segment_id()
+    );
+
+-- Права на функцию set_session_ctx
+REVOKE ALL ON FUNCTION app.set_session_ctx(INTEGER, INTEGER) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.set_session_ctx(INTEGER) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER, INTEGER) 
+    TO office_manager, office_operator, dml_admin;
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER) 
+    TO office_manager, office_operator, dml_admin;
+
+-- Права на справочник segments
+GRANT SELECT ON ref.segments TO office_manager, office_operator;
+GRANT SELECT ON ref.segments TO PUBLIC;  -- Нужно для тестов и работы функций
+
+-- Права на таблицы для работы функций в политиках RLS
+GRANT SELECT ON app.user_mappings TO office_manager, office_operator;
+GRANT SELECT ON app.user_mappings TO PUBLIC;  -- Нужно для работы политик RLS
+GRANT SELECT ON app.employees TO office_manager, office_operator;
+
+-- Права на выполнение функций для всех пользователей
+GRANT EXECUTE ON FUNCTION app.get_session_segment_id() TO office_manager, office_operator, PUBLIC;
+GRANT EXECUTE ON FUNCTION app.get_user_segment_id() TO office_manager, office_operator, PUBLIC;
+GRANT EXECUTE ON FUNCTION app.get_user_segment_id() TO office_manager, office_operator, PUBLIC;
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER, INTEGER) TO office_manager, office_operator, PUBLIC;
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER) TO office_manager, office_operator, PUBLIC;
+
+-- Права на схемы для всех пользователей (нужно для работы политик RLS)
+GRANT USAGE ON SCHEMA ref TO PUBLIC;
+GRANT USAGE ON SCHEMA app TO PUBLIC;
+
+-- Права на схемы для конкретных пользователей (для тестов)
+GRANT USAGE ON SCHEMA ref TO anna_ivanova, petr_smirnov, maria_petrova, auditor_login;
+GRANT USAGE ON SCHEMA app TO anna_ivanova, petr_smirnov, maria_petrova, auditor_login;
+GRANT SELECT ON ref.segments TO anna_ivanova, petr_smirnov, maria_petrova, auditor_login;
+GRANT SELECT ON app.user_mappings TO anna_ivanova, petr_smirnov, maria_petrova, auditor_login;
+GRANT EXECUTE ON FUNCTION app.get_session_segment_id() TO anna_ivanova, petr_smirnov, maria_petrova, auditor_login;
+GRANT EXECUTE ON FUNCTION app.get_user_segment_id() TO anna_ivanova, petr_smirnov, maria_petrova, auditor_login;
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER, INTEGER) TO anna_ivanova, petr_smirnov, maria_petrova;
+GRANT EXECUTE ON FUNCTION app.set_session_ctx(INTEGER) TO anna_ivanova, petr_smirnov, maria_petrova;
 
 -- =============================================
 -- 12. АВТОМАТИЧЕСКОЕ ЛОГИРОВАНИЕ ПОДКЛЮЧЕНИЙ
@@ -705,6 +1208,7 @@ AS $$
 DECLARE
     v_shipment_id INTEGER;
     v_max_weight NUMERIC;
+    v_segment_id INTEGER;
     v_input JSONB := jsonb_strip_nulls(
         jsonb_build_object(
             'tracking_number', p_tracking_number,
@@ -768,6 +1272,15 @@ BEGIN
             );
         END IF;
 
+        -- Получаем segment_id из отделения-отправителя
+        SELECT segment_id INTO v_segment_id
+        FROM app.offices
+        WHERE id = p_from_office_id;
+        
+        IF v_segment_id IS NULL THEN
+            RAISE EXCEPTION USING MESSAGE = format('Не найден segment_id для отделения %s', p_from_office_id);
+        END IF;
+
         INSERT INTO app.shipments (
             tracking_number,
             from_office_id,
@@ -777,7 +1290,8 @@ BEGIN
             shipment_type_id,
             weight,
             declared_value,
-            price
+            price,
+            segment_id
         )
         VALUES (
             p_tracking_number,
@@ -788,7 +1302,8 @@ BEGIN
             p_shipment_type_id,
             p_weight,
             p_declared_value,
-            p_price
+            p_price,
+            v_segment_id
         )
         RETURNING id INTO v_shipment_id;
 
@@ -952,6 +1467,335 @@ REVOKE ALL ON FUNCTION app.secure_adjust_declared_value(TEXT, NUMERIC) FROM PUBL
 GRANT EXECUTE ON FUNCTION app.secure_create_shipment(
     TEXT, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, NUMERIC, NUMERIC, NUMERIC
 ) TO office_operator, office_manager, dml_admin;
+-- ЛАБОРАТОРНАЯ РАБОТА №3: Триггер для проверки segment_id при INSERT
+-- =============================================
+-- 11.5. ТРИГГЕР ДЛЯ ПРОВЕРКИ SEGMENT_ID ПРИ INSERT
+-- =============================================
+
+-- Функция триггера для проверки segment_id при вставке
+CREATE OR REPLACE FUNCTION app.check_segment_id_on_insert()
+RETURNS TRIGGER
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_user_segment_id INTEGER;
+    v_actual_user TEXT;
+    v_is_auditor BOOLEAN;
+BEGIN
+    v_actual_user := session_user;
+    
+    -- Получаем segment_id пользователя напрямую
+    SELECT um.segment_id INTO v_user_segment_id
+    FROM app.user_mappings um
+    WHERE um.db_username = v_actual_user;
+    
+    -- Проверяем, является ли пользователь auditor
+    SELECT EXISTS (
+        SELECT 1 
+        FROM pg_roles r
+        JOIN pg_auth_members am ON r.oid = am.member
+        JOIN pg_roles auditor_role ON am.roleid = auditor_role.oid
+        WHERE r.rolname = v_actual_user
+        AND auditor_role.rolname = 'auditor'
+    ) INTO v_is_auditor;
+    
+    -- Если не auditor и segment_id не совпадает, блокируем
+    IF NOT v_is_auditor THEN
+        IF v_user_segment_id IS NULL THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Пользователь %s не привязан к сегменту',
+                v_actual_user
+            );
+        END IF;
+        
+        IF NEW.segment_id IS DISTINCT FROM v_user_segment_id THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Политика RLS: пользователь %s не может вставлять строки с segment_id = %s (его segment_id = %s)',
+                v_actual_user, NEW.segment_id, v_user_segment_id
+            );
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION app.check_segment_id_on_insert()
+IS 'Триггер для проверки segment_id при вставке (дополнение к RLS политикам)';
+
+-- Создаем триггер
+DROP TRIGGER IF EXISTS check_segment_id_insert ON app.users;
+CREATE TRIGGER check_segment_id_insert
+    BEFORE INSERT ON app.users
+    FOR EACH ROW
+    EXECUTE FUNCTION app.check_segment_id_on_insert();
+
+COMMENT ON TRIGGER check_segment_id_insert ON app.users
+IS 'Триггер для проверки segment_id при вставке в таблицу users';
+
+-- ЛАБОРАТОРНАЯ РАБОТА №3: Триггер для проверки segment_id при UPDATE
+-- =============================================
+-- 11.5.2. ТРИГГЕР ДЛЯ ПРОВЕРКИ SEGMENT_ID ПРИ UPDATE
+-- =============================================
+
+-- Функция триггера для проверки segment_id при обновлении
+CREATE OR REPLACE FUNCTION app.check_segment_id_on_update()
+RETURNS TRIGGER
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_user_segment_id INTEGER;
+    v_actual_user TEXT;
+    v_is_auditor BOOLEAN;
+BEGIN
+    v_actual_user := session_user;
+    
+    -- Если segment_id не изменился, разрешаем обновление
+    IF OLD.segment_id = NEW.segment_id THEN
+        RETURN NEW;
+    END IF;
+    
+    SELECT um.segment_id INTO v_user_segment_id
+    FROM app.user_mappings um
+    WHERE um.db_username = v_actual_user;
+    
+    SELECT EXISTS (
+        SELECT 1 
+        FROM pg_roles r
+        JOIN pg_auth_members am ON r.oid = am.member
+        JOIN pg_roles auditor_role ON am.roleid = auditor_role.oid
+        WHERE r.rolname = v_actual_user
+        AND auditor_role.rolname = 'auditor'
+    ) INTO v_is_auditor;
+    
+    IF NOT v_is_auditor THEN
+        IF v_user_segment_id IS NULL THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Пользователь %s не привязан к сегменту',
+                v_actual_user
+            );
+        END IF;
+        
+        IF NEW.segment_id IS DISTINCT FROM v_user_segment_id THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Политика RLS: пользователь %s не может обновлять строки с segment_id = %s (его segment_id = %s)',
+                v_actual_user, NEW.segment_id, v_user_segment_id
+            );
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+-- Создаем триггер
+DROP TRIGGER IF EXISTS check_segment_id_update ON app.users;
+CREATE TRIGGER check_segment_id_update
+    BEFORE UPDATE ON app.users
+    FOR EACH ROW
+    WHEN (OLD.segment_id IS DISTINCT FROM NEW.segment_id)
+    EXECUTE FUNCTION app.check_segment_id_on_update();
+
+COMMENT ON FUNCTION app.check_segment_id_on_update()
+IS 'Триггер для проверки segment_id при обновлении (дополнение к RLS политикам)';
+
+COMMENT ON TRIGGER check_segment_id_update ON app.users
+IS 'Триггер для проверки segment_id при обновлении в таблице users';
+
+-- ЛАБОРАТОРНАЯ РАБОТА №3: Функция для безопасной вставки пользователя
+-- =============================================
+-- 11.6. ФУНКЦИЯ ДЛЯ БЕЗОПАСНОЙ ВСТАВКИ ПОЛЬЗОВАТЕЛЯ
+-- =============================================
+
+-- Функция для безопасной вставки пользователя с проверкой segment_id
+CREATE OR REPLACE FUNCTION app.secure_insert_user(
+    p_email TEXT,
+    p_phone TEXT,
+    p_segment_id INTEGER
+)
+RETURNS INTEGER
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_user_id INTEGER;
+    v_user_segment_id INTEGER;
+    v_actual_user TEXT;
+    v_is_auditor BOOLEAN;
+BEGIN
+    v_actual_user := session_user;
+    
+    -- Получаем segment_id пользователя
+    SELECT um.segment_id INTO v_user_segment_id
+    FROM app.user_mappings um
+    WHERE um.db_username = v_actual_user;
+    
+    -- Проверяем, является ли пользователь auditor
+    SELECT EXISTS (
+        SELECT 1 
+        FROM pg_roles r
+        JOIN pg_auth_members am ON r.oid = am.member
+        JOIN pg_roles auditor_role ON am.roleid = auditor_role.oid
+        WHERE r.rolname = v_actual_user
+        AND auditor_role.rolname = 'auditor'
+    ) INTO v_is_auditor;
+    
+    -- Если не auditor и segment_id не совпадает, блокируем
+    IF NOT v_is_auditor THEN
+        IF v_user_segment_id IS NULL THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Пользователь %s не привязан к сегменту',
+                v_actual_user
+            );
+        END IF;
+        
+        IF p_segment_id IS DISTINCT FROM v_user_segment_id THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Политика RLS: пользователь %s не может вставлять строки с segment_id = %s (его segment_id = %s)',
+                v_actual_user, p_segment_id, v_user_segment_id
+            );
+        END IF;
+    END IF;
+    
+    -- Выполняем вставку
+    INSERT INTO app.users (email, phone, segment_id)
+    VALUES (p_email, p_phone, p_segment_id)
+    RETURNING id INTO v_user_id;
+    
+    RETURN v_user_id;
+END;
+$$;
+
+COMMENT ON FUNCTION app.secure_insert_user(TEXT, TEXT, INTEGER)
+IS 'Безопасная вставка пользователя с проверкой segment_id';
+
+GRANT EXECUTE ON FUNCTION app.secure_insert_user(TEXT, TEXT, INTEGER) TO anna_ivanova, petr_smirnov, maria_petrova, office_manager, office_operator;
+
+-- CHECK CONSTRAINT для проверки segment_id (дополнительная защита)
+ALTER TABLE app.users DROP CONSTRAINT IF EXISTS check_segment_id_constraint;
+
+CREATE OR REPLACE FUNCTION app.check_segment_id_constraint(p_segment_id INTEGER)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_user_segment_id INTEGER;
+    v_actual_user TEXT;
+    v_is_auditor BOOLEAN;
+BEGIN
+    v_actual_user := current_user;
+    
+    -- Проверяем, является ли пользователь auditor
+    SELECT EXISTS (
+        SELECT 1 
+        FROM pg_roles r
+        JOIN pg_auth_members am ON r.oid = am.member
+        JOIN pg_roles auditor_role ON am.roleid = auditor_role.oid
+        WHERE r.rolname = v_actual_user
+        AND auditor_role.rolname = 'auditor'
+    ) INTO v_is_auditor;
+    
+    IF v_is_auditor THEN
+        RETURN true;
+    END IF;
+    
+    -- Получаем segment_id пользователя
+    SELECT um.segment_id INTO v_user_segment_id
+    FROM app.user_mappings um
+    WHERE um.db_username = v_actual_user;
+    
+    IF v_user_segment_id IS NULL THEN
+        RETURN false;
+    END IF;
+    
+    RETURN p_segment_id = v_user_segment_id;
+END;
+$$;
+
+ALTER TABLE app.users 
+ADD CONSTRAINT check_segment_id_constraint 
+CHECK (app.check_segment_id_constraint(segment_id)) NOT VALID;
+
+COMMENT ON CONSTRAINT check_segment_id_constraint ON app.users
+IS 'CHECK CONSTRAINT для проверки segment_id при вставке/обновлении';
+
+-- ЛАБОРАТОРНАЯ РАБОТА №3: Функция для безопасной вставки пользователя
+-- =============================================
+-- 11.7. ФУНКЦИЯ ДЛЯ БЕЗОПАСНОЙ ВСТАВКИ ПОЛЬЗОВАТЕЛЯ
+-- =============================================
+
+-- Функция для безопасной вставки пользователя с проверкой segment_id
+CREATE OR REPLACE FUNCTION app.secure_insert_user(
+    p_email TEXT,
+    p_phone TEXT,
+    p_segment_id INTEGER
+)
+RETURNS INTEGER
+SECURITY DEFINER
+SET search_path = app, public
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_user_id INTEGER;
+    v_user_segment_id INTEGER;
+    v_actual_user TEXT;
+    v_is_auditor BOOLEAN;
+BEGIN
+    v_actual_user := session_user;
+    
+    -- Получаем segment_id пользователя
+    SELECT um.segment_id INTO v_user_segment_id
+    FROM app.user_mappings um
+    WHERE um.db_username = v_actual_user;
+    
+    -- Проверяем, является ли пользователь auditor
+    SELECT EXISTS (
+        SELECT 1 
+        FROM pg_roles r
+        JOIN pg_auth_members am ON r.oid = am.member
+        JOIN pg_roles auditor_role ON am.roleid = auditor_role.oid
+        WHERE r.rolname = v_actual_user
+        AND auditor_role.rolname = 'auditor'
+    ) INTO v_is_auditor;
+    
+    -- Если не auditor и segment_id не совпадает, блокируем
+    IF NOT v_is_auditor THEN
+        IF v_user_segment_id IS NULL THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Пользователь %s не привязан к сегменту',
+                v_actual_user
+            );
+        END IF;
+        
+        IF p_segment_id IS DISTINCT FROM v_user_segment_id THEN
+            RAISE EXCEPTION USING MESSAGE = format(
+                'Политика RLS: пользователь %s не может вставлять строки с segment_id = %s (его segment_id = %s)',
+                v_actual_user, p_segment_id, v_user_segment_id
+            );
+        END IF;
+    END IF;
+    
+    -- Выполняем вставку
+    INSERT INTO app.users (email, phone, segment_id)
+    VALUES (p_email, p_phone, p_segment_id)
+    RETURNING id INTO v_user_id;
+    
+    RETURN v_user_id;
+END;
+$$;
+
+COMMENT ON FUNCTION app.secure_insert_user(TEXT, TEXT, INTEGER)
+IS 'Безопасная вставка пользователя с проверкой segment_id';
+
+GRANT EXECUTE ON FUNCTION app.secure_insert_user(TEXT, TEXT, INTEGER) TO anna_ivanova, petr_smirnov, maria_petrova, office_manager, office_operator;
+
 GRANT EXECUTE ON FUNCTION app.secure_update_shipment_status(TEXT, TEXT, TEXT)
     TO office_manager, dml_admin;
 GRANT EXECUTE ON FUNCTION app.secure_adjust_declared_value(TEXT, NUMERIC)
