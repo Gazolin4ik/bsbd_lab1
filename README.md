@@ -103,6 +103,83 @@ docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab2_rule_benchmark.s
 ```
 Вывод содержит длительность вставок для обеих стратегий и количество загруженных строк. По итогам выбрана связка CHECK+Trigger: CHECK для простых внутритабличных правил, триггер для кросс-табличной проверки веса.
 
+## Лабораторная работа №4
+
+Полный отчёт: `LAB4_REPORT.md`.
+
+### Новые цели
+- безопасные представления (updatable VIEW с WITH CHECK OPTION, SECURITY BARRIER VIEW)
+- аудит изменений с маскированием чувствительных данных
+- тесты доступов (4 кейса)
+- анализ производительности RLS
+- автоматическое резервное копирование audit-логов
+
+### Безопасные представления
+
+#### Updatable VIEW с WITH CHECK OPTION
+- `app.shipments_public_view` — представление для работы с неконфиденциальными полями отправлений
+- Скрывает чувствительные поля: `sender_id`, `recipient_id`, `declared_value`
+- WITH CHECK OPTION предотвращает обход ограничений через изменение скрытых полей
+- Использует INSTEAD OF триггер для контроля обновлений
+
+#### SECURITY BARRIER VIEW для агрегатов
+- `app.shipments_statistics_view` — агрегированная статистика по отправлениям
+- Защищает от побочных каналов через HAVING/подзапросы
+- Возвращает только агрегированные данные (COUNT, SUM, AVG)
+
+### Аудит изменений
+
+#### Таблица `audit.row_change_log`
+- Логирует все UPDATE/DELETE операции на критичных таблицах (users, shipments, employees)
+- Фиксирует: кто (changed_by), что (table_name, record_id), когда (change_time), old/new данные
+- Чувствительные поля маскируются/хэшируются:
+  - **users**: email → `***@domain`, phone → `HASH:md5`, passport_data → `HASH:md5`
+  - **shipments**: declared_value → `>1M` / `>100K` / `>10K` / `>1K`
+  - **employees**: first_name/last_name → `A***`
+
+#### Триггеры аудита
+- `trg_users_audit` — аудит изменений пользователей
+- `trg_shipments_audit` — аудит изменений отправлений
+- `trg_employees_audit` — аудит изменений сотрудников
+
+### Автоматическое резервное копирование
+
+#### Функция `audit.backup_audit_logs(days_interval INT)`
+- Переносит записи старше указанного количества дней из `audit.row_change_log` в `audit.row_change_log_archive`
+- Удаляет перенесенные записи из основной таблицы
+- Возвращает количество архивированных и удаленных записей
+
+Пример использования:
+```sql
+SELECT * FROM audit.backup_audit_logs(90); -- Архивация записей старше 90 дней
+```
+
+### Тесты доступов (4 кейса)
+
+1. **Попытка обхода WITH CHECK OPTION** — должна блокироваться
+2. **Попытка получения деталей через SECURITY BARRIER VIEW** — должна возвращать только агрегаты
+3. **Изменение строки** — проверка появления записи в `row_change_log`
+4. **Попытка удаления строки не из своего сегмента** — ошибка RLS
+
+Запуск: `./run_tests.sh lab4`
+
+### Анализ производительности
+
+Скрипт `lab4_performance_analysis.sql` выполняет:
+- `EXPLAIN (ANALYZE, BUFFERS)` для типовых запросов
+- Подбор индексов под условия политик RLS
+- Сравнение производительности до/после RLS
+- Анализ использования индексов через `pg_stat_user_indexes`
+
+Рекомендуемые индексы:
+- `idx_shipments_segment_status_created` — для фильтрации по segment_id и current_status
+- Индексы на `segment_id` уже существуют для всех таблиц с RLS
+
+Запуск:
+```bash
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab4_performance_analysis.sql
+```
+
 ## Остановка системы
 
 ```bash

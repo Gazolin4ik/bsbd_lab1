@@ -16,6 +16,9 @@ services:
       - ./lab2_rule_benchmark.sql:/lab2_rule_benchmark.sql
       - ./test_sensitive_functions.sql:/test_sensitive_functions.sql
       - ./test_lab3_rls.sql:/test_lab3_rls.sql
+      - ./migrate_lab4.sql:/migrate_lab4.sql
+      - ./test_lab4.sql:/test_lab4.sql
+      - ./lab4_performance_analysis.sql:/lab4_performance_analysis.sql
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
