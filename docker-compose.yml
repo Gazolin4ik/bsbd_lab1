@@ -9,7 +9,9 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      # init scripts are executed in alphabetical order, so 10_... runs before 20_...
+      - ./init.sql:/docker-entrypoint-initdb.d/10_init.sql
+      - ./migrate_lab5.sql:/docker-entrypoint-initdb.d/20_migrate_lab5.sql
       - ./test_security_complete.sql:/test_security_fixed.sql
       - ./test_login_logging_complete.sql:/test_login_logging_complete.sql
       - ./test_lab2_security.sql:/test_lab2_security.sql
