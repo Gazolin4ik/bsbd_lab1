@@ -104,11 +104,13 @@ CREATE TABLE ref.shipment_types (
     name VARCHAR(100) NOT NULL,
     max_weight DECIMAL(10,2),
     base_price DECIMAL(10,2),
-    sla_days SMALLINT NOT NULL DEFAULT 5
+    sla_days SMALLINT NOT NULL DEFAULT 5,
+    marketing_discount_percent NUMERIC(5,2) NOT NULL DEFAULT 0
 );
 
 COMMENT ON TABLE ref.shipment_types IS 'Типы почтовых отправлений';
 COMMENT ON COLUMN ref.shipment_types.sla_days IS 'Target delivery SLA in days for this service type';
+COMMENT ON COLUMN ref.shipment_types.marketing_discount_percent IS 'Marketing discount for this service type, %';
 
 -- Таблица отделений
 CREATE TABLE app.offices (
