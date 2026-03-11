@@ -71,7 +71,7 @@ GRANT office_operator TO maria_petrova;
 GRANT auditor TO auditor_login;
 
 -- Права на подключение
-GRANT CONNECT ON DATABASE bsbd_lab1 TO anna_ivanova, petr_smirnov, maria_petrova;
+GRANT CONNECT ON DATABASE bsbd_lab1 TO anna_ivanova, petr_smirnov, maria_petrova, auditor_login;
 
 -- =============================================
 -- 6. СОЗДАНИЕ ТАБЛИЦ
@@ -103,10 +103,12 @@ CREATE TABLE ref.shipment_types (
     code VARCHAR(10) NOT NULL UNIQUE,
     name VARCHAR(100) NOT NULL,
     max_weight DECIMAL(10,2),
-    base_price DECIMAL(10,2)
+    base_price DECIMAL(10,2),
+    sla_days SMALLINT NOT NULL DEFAULT 5
 );
 
 COMMENT ON TABLE ref.shipment_types IS 'Типы почтовых отправлений';
+COMMENT ON COLUMN ref.shipment_types.sla_days IS 'Target delivery SLA in days for this service type';
 
 -- Таблица отделений
 CREATE TABLE app.offices (
@@ -167,6 +169,79 @@ CREATE TABLE app.shipments (
 );
 
 COMMENT ON TABLE app.shipments IS 'Почтовые отправления';
+
+-- =============================================
+-- 6.1. LAB5: PRICING FEEDBACK (DISCOUNTS APPLIED)
+-- =============================================
+-- We store discount application results per shipment to make marketing feedback auditable:
+-- - price_original: price before discounts
+-- - discount_percent_applied: combined discount (VIP + marketing)
+-- - price_final: final charged price after discount
+
+ALTER TABLE app.shipments
+    ADD COLUMN IF NOT EXISTS price_original NUMERIC(10,2),
+    ADD COLUMN IF NOT EXISTS discount_percent_applied NUMERIC(5,2) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS price_final NUMERIC(10,2);
+
+COMMENT ON COLUMN app.shipments.price_original IS 'Original price before any discounts';
+COMMENT ON COLUMN app.shipments.discount_percent_applied IS 'Combined discount percent applied (VIP + marketing)';
+COMMENT ON COLUMN app.shipments.price_final IS 'Final price after discounts';
+
+CREATE OR REPLACE FUNCTION app.apply_shipment_discounts()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = app, ref, public
+AS $$
+DECLARE
+    v_marketing_discount NUMERIC(5,2) := 0;
+    v_vip_level SMALLINT := 0;
+    v_vip_discount NUMERIC(5,2) := 0;
+    v_total_discount NUMERIC(5,2) := 0;
+BEGIN
+    -- Ensure original price is captured once
+    IF NEW.price_original IS NULL THEN
+        NEW.price_original := NEW.price;
+    END IF;
+
+    SELECT COALESCE(t.marketing_discount_percent, 0)
+      INTO v_marketing_discount
+    FROM ref.shipment_types t
+    WHERE t.id = NEW.shipment_type_id;
+
+    SELECT COALESCE(u.vip_level, 0)
+      INTO v_vip_level
+    FROM app.users u
+    WHERE u.id = NEW.sender_id;
+
+    v_vip_discount := CASE
+        WHEN v_vip_level >= 2 THEN 10.0
+        WHEN v_vip_level = 1 THEN 5.0
+        ELSE 0.0
+    END;
+
+    v_total_discount := LEAST(v_marketing_discount + v_vip_discount, 30.0);
+
+    NEW.discount_percent_applied := v_total_discount;
+    NEW.price_final := ROUND(NEW.price_original * (1 - (v_total_discount / 100.0)), 2);
+    NEW.price := NEW.price_final;
+
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_apply_shipment_discounts ON app.shipments;
+CREATE TRIGGER trg_apply_shipment_discounts
+BEFORE INSERT OR UPDATE OF sender_id, shipment_type_id, price, price_original
+ON app.shipments
+FOR EACH ROW
+EXECUTE FUNCTION app.apply_shipment_discounts();
+
+-- LAB5 change #3: delivery performance tracking (SLA / on-time)
+ALTER TABLE app.shipments
+    ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP NULL;
+
+COMMENT ON COLUMN app.shipments.delivered_at IS 'When shipment was delivered (for SLA/quality analytics)';
 
 -- Таблица маршрутов доставки
 CREATE TABLE app.delivery_routes (
@@ -460,28 +535,40 @@ COMMENT ON FUNCTION public.on_connect() IS
 
 -- Справочники
 INSERT INTO ref.office_types (code, name, description) VALUES
-('HEAD', 'Главное отделение', 'Центральное отделение города'),
-('DIST', 'Районное отделение', 'Отделение в районе города'),
-('VILL', 'Сельское отделение', 'Отделение в сельской местности');
+('HEAD', 'Head Office', 'Main city post office'),
+('DIST', 'District Office', 'Post office in a city district'),
+('VILL', 'Rural Office', 'Post office in a rural area');
 
 INSERT INTO ref.positions (code, name, access_level) VALUES
-('DIR', 'Директор', 3),
-('OPM', 'Оператор', 1),
-('COURIER', 'Курьер', 2),
-('MANAGER', 'Менеджер', 2);
+('DIR', 'Director', 3),
+('OPM', 'Operator', 1),
+('COURIER', 'Courier', 2),
+('MANAGER', 'Manager', 2);
 
 INSERT INTO ref.shipment_types (code, name, max_weight, base_price) VALUES
-('LETTER', 'Письмо', 0.1, 50.00),
-('PARCEL', 'Посылка', 20.0, 200.00),
-('REGISTERED', 'Заказное письмо', 0.1, 100.00),
-('EXPRESS', 'Экспресс-отправление', 5.0, 500.00);
+('LETTER', 'Letter', 0.1, 50.00),
+('PARCEL', 'Parcel', 20.0, 200.00),
+('REGISTERED', 'Registered letter', 0.1, 100.00),
+('EXPRESS', 'Express shipment', 5.0, 500.00);
+
+-- Set realistic delivery SLAs per service type
+UPDATE ref.shipment_types SET sla_days = 7 WHERE code = 'LETTER';
+UPDATE ref.shipment_types SET sla_days = 10 WHERE code = 'PARCEL';
+UPDATE ref.shipment_types SET sla_days = 5 WHERE code = 'REGISTERED';
+UPDATE ref.shipment_types SET sla_days = 2 WHERE code = 'EXPRESS';
 
 -- Отделения
 INSERT INTO app.offices (office_number, address, office_type_id, phone) VALUES
-('MOS001', 'г. Москва, ул. Тверская, д. 1', 1, '+7-495-111-11-11'),
-('MOS002', 'г. Москва, ул. Арбат, д. 25', 2, '+7-495-222-22-22'),
-('SPB001', 'г. Санкт-Петербург, Невский пр., д. 10', 1, '+7-812-333-33-33'),
-('NOV001', 'г. Новосибирск, ул. Ленина, д. 5', 1, '+7-383-444-44-44');
+('MOS001', 'Moscow, Tverskaya St., 1', 1, '+7-495-111-11-11'),
+('MOS002', 'Moscow, Arbat St., 25', 2, '+7-495-222-22-22'),
+('SPB001', 'Saint Petersburg, Nevsky Ave., 10', 1, '+7-812-333-33-33'),
+('NOV001', 'Novosibirsk, Lenina St., 5', 1, '+7-383-444-44-44'),
+('MOS003', 'Moscow, Mira Ave., 50', 2, '+7-495-333-33-33'),
+('MOS004', 'Moscow, Profsoyuznaya St., 12', 3, '+7-495-444-44-44'),
+('SPB002', 'Saint Petersburg, Ligovsky Ave., 20', 2, '+7-812-444-44-44'),
+('SPB003', 'Saint Petersburg, Rubinstein St., 7', 3, '+7-812-555-55-55'),
+('NOV002', 'Novosibirsk, Krasny Prospekt, 15', 2, '+7-383-555-55-55'),
+('NOV003', 'Novosibirsk, Frunze St., 30', 3, '+7-383-666-66-66');
 
 -- Пользователи
 INSERT INTO app.users (email, phone, passport_data) VALUES
@@ -489,15 +576,25 @@ INSERT INTO app.users (email, phone, passport_data) VALUES
 ('petrov@gmail.com', '+7-922-222-22-22', 'encrypted_2'),
 ('sidorov@yandex.ru', '+7-933-333-33-33', 'encrypted_3'),
 ('smirnova@mail.ru', '+7-944-444-44-44', 'encrypted_4'),
-('kuznetsov@gmail.com', '+7-955-555-55-55', 'encrypted_5');
+('kuznetsov@gmail.com', '+7-955-555-55-55', 'encrypted_5'),
+('orlov@mail.ru', '+7-966-666-66-66', 'encrypted_6'),
+('volkova@yandex.ru', '+7-977-777-77-77', 'encrypted_7'),
+('fedorov@gmail.com', '+7-988-888-88-88', 'encrypted_8'),
+('belova@mail.ru', '+7-999-999-99-99', 'encrypted_9'),
+('nikitin@yandex.ru', '+7-910-000-00-00', 'encrypted_10');
 
 -- Сотрудники
 INSERT INTO app.employees (office_id, first_name, last_name, position_id, hire_date) VALUES
-(1, 'Анна', 'Иванова', 4, '2020-01-15'),  -- MANAGER
-(1, 'Петр', 'Смирнов', 2, '2021-03-20'),   -- OPERATOR
-(2, 'Мария', 'Петрова', 2, '2022-05-10'),  -- OPERATOR
-(3, 'Алексей', 'Козлов', 3, '2021-07-15'), -- COURIER
-(4, 'Ольга', 'Новикова', 1, '2020-11-30'); -- DIRECTOR
+(1, 'Anna', 'Ivanova', 4, '2020-01-15'),     -- MANAGER
+(1, 'Petr', 'Smirnov', 2, '2021-03-20'),     -- OPERATOR
+(2, 'Maria', 'Petrova', 2, '2022-05-10'),    -- OPERATOR
+(3, 'Alexey', 'Kozlov', 3, '2021-07-15'),    -- COURIER
+(4, 'Olga', 'Novikova', 1, '2020-11-30'),    -- DIRECTOR
+(5, 'Igor', 'Orlov', 2, '2022-01-20'),       -- MOS003, OPERATOR
+(6, 'Elena', 'Volkova', 4, '2021-09-05'),    -- MOS004, MANAGER
+(7, 'Dmitry', 'Fedorov', 3, '2023-02-01'),   -- SPB002, COURIER
+(8, 'Anna', 'Belova', 2, '2023-03-12'),      -- SPB003, OPERATOR
+(9, 'Nikita', 'Nikitin', 2, '2024-01-10');   -- NOV002, OPERATOR
 
 -- Отправления
 INSERT INTO app.shipments (tracking_number, from_office_id, to_office_id, sender_id, recipient_id, shipment_type_id, weight, declared_value, price) VALUES
@@ -506,20 +603,58 @@ INSERT INTO app.shipments (tracking_number, from_office_id, to_office_id, sender
 ('TRK003', 3, 1, 3, 1, 3, 0.08, 1000.00, 100.00),
 ('TRK004', 1, 2, 4, 5, 4, 1.2, 15000.00, 500.00);
 
+-- Дополнительные отправления для более реалистичных метрик и заполнения партиций
+INSERT INTO app.shipments (
+    tracking_number, from_office_id, to_office_id,
+    sender_id, recipient_id, shipment_type_id,
+    weight, declared_value, price, created_at, updated_at
+) VALUES
+-- Исторические данные (уйдут в архивную партицию после копирования)
+('TRK005', 2, 3, 1, 6, 2, 3.0, 8000.00, 250.00, '2024-11-10 10:00:00', '2024-11-10 10:00:00'),
+('TRK006', 3, 4, 2, 7, 4, 2.0, 20000.00, 600.00, '2025-03-05 12:30:00', '2025-03-05 12:30:00'),
+-- Data for the reporting month (for ARPU/ARPPU and top metrics).
+-- With CURRENT_DATE = 2026-03-10, "last month" = [2026-02-01, 2026-03-01),
+-- so we use dates in February 2026 here.
+('TRK007', 5, 7, 3, 8, 1, 0.09, NULL, 60.00, '2026-02-10 09:15:00', '2026-02-10 09:15:00'),
+('TRK008', 6, 8, 4, 9, 2, 5.0, 12000.00, 300.00, '2026-02-15 14:20:00', '2026-02-15 14:20:00'),
+('TRK009', 7, 9, 5, 10, 3, 0.1, 2000.00, 150.00, '2026-02-18 16:45:00', '2026-02-18 16:45:00'),
+('TRK010', 8, 5, 6, 1, 4, 4.5, 25000.00, 700.00, '2026-02-22 11:05:00', '2026-02-22 11:05:00');
+
+-- Fill delivered_at for a mix of on-time and late deliveries (report-ready SLA examples)
+UPDATE app.shipments SET delivered_at = created_at + interval '6 days' WHERE tracking_number = 'TRK007';  -- Letter, on time (SLA 7)
+UPDATE app.shipments SET delivered_at = created_at + interval '12 days' WHERE tracking_number = 'TRK008'; -- Parcel, late (SLA 10)
+UPDATE app.shipments SET delivered_at = created_at + interval '3 days' WHERE tracking_number = 'TRK009';  -- Registered, on time (SLA 5)
+UPDATE app.shipments SET delivered_at = created_at + interval '1 day' WHERE tracking_number = 'TRK010';   -- Express, on time (SLA 2)
+
 -- Маршруты
 INSERT INTO app.delivery_routes (shipment_id, office_id, sequence_order, planned_arrival, status) VALUES
 (1, 1, 1, '2024-01-15 10:00:00', 'completed'),
 (1, 2, 2, '2024-01-16 12:00:00', 'pending'),
 (1, 3, 3, '2024-01-17 14:00:00', 'pending'),
 (2, 2, 1, '2024-01-15 11:00:00', 'completed'),
-(2, 4, 2, '2024-01-18 16:00:00', 'pending');
+(2, 4, 2, '2024-01-18 16:00:00', 'pending'),
+(3, 3, 1, '2025-03-06 09:00:00', 'completed'),
+(4, 1, 1, '2025-03-07 13:00:00', 'completed'),
+(5, 2, 1, '2024-11-11 09:30:00', 'completed'),
+(6, 3, 1, '2025-03-06 14:00:00', 'pending'),
+(7, 5, 1, '2026-01-11 10:00:00', 'completed'),
+(8, 6, 1, '2026-01-16 15:00:00', 'completed'),
+(9, 7, 1, '2026-01-19 17:00:00', 'pending'),
+(10, 8, 1, '2026-01-23 12:00:00', 'pending');
 
 -- Операции
 INSERT INTO app.shipment_operations (shipment_id, employee_id, operation_type, location, notes) VALUES
-(1, 2, 'прием', 'MOS001', 'Отправление принято'),
-(1, 2, 'сортировка', 'MOS001', 'Отправление отсортировано'),
-(2, 3, 'прием', 'MOS002', 'Посылка принята'),
-(3, 4, 'прием', 'SPB001', 'Заказное письмо принято');
+(1, 2, 'acceptance', 'MOS001', 'Shipment accepted'),
+(1, 2, 'sorting', 'MOS001', 'Shipment sorted'),
+(2, 3, 'acceptance', 'MOS002', 'Parcel accepted'),
+(3, 4, 'acceptance', 'SPB001', 'Registered letter accepted'),
+(4, 1, 'acceptance', 'MOS001', 'Express shipment accepted'),
+(5, 7, 'acceptance', 'SPB002', 'Historical shipment accepted'),
+(6, 8, 'acceptance', 'SPB003', 'High-value shipment accepted'),
+(7, 5, 'acceptance', 'MOS003', 'Last-month shipment accepted'),
+(8, 6, 'acceptance', 'MOS004', 'Last-month parcel accepted'),
+(9, 9, 'acceptance', 'NOV002', 'Last-month registered letter accepted'),
+(10, 2, 'acceptance', 'MOS001', 'Large last-month express shipment accepted');
 
 -- Соответствия пользователей
 -- segment_id будет заполнен позже в разделе ЛР3 после добавления segment_id в employees
@@ -1691,6 +1826,11 @@ DECLARE
     v_is_auditor BOOLEAN;
 BEGIN
     v_actual_user := current_user;
+
+    -- Administrative bypass: postgres (superuser) may run maintenance updates
+    IF v_actual_user = 'postgres' THEN
+        RETURN true;
+    END IF;
     
     -- Проверяем, является ли пользователь auditor
     SELECT EXISTS (
@@ -1804,3 +1944,179 @@ GRANT SELECT ON audit.function_calls TO auditor, audit_viewer;
 
 -- Логируем создание БД
 SELECT public.log_user_login();
+
+-- =============================================
+-- 13. ЛАБОРАТОРНАЯ РАБОТА №5:
+--     СЕКЦИОНИРОВАНИЕ И МАРКЕТИНГОВЫЕ МЕТРИКИ
+-- =============================================
+
+-- 13.1. СЕКЦИОНИРОВАННАЯ ТАБЛИЦА ОТПРАВЛЕНИЙ
+
+-- Родительская секционируемая таблица, структура = app.shipments
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM   information_schema.tables
+        WHERE  table_schema = 'app'
+        AND    table_name   = 'shipments_partitioned'
+    ) THEN
+        EXECUTE $cte$
+            CREATE TABLE app.shipments_partitioned (
+                LIKE app.shipments
+                    INCLUDING DEFAULTS
+                    EXCLUDING CONSTRAINTS
+                    EXCLUDING INDEXES
+            )
+            PARTITION BY RANGE (created_at)
+        $cte$;
+
+        COMMENT ON TABLE app.shipments_partitioned IS
+        'Секционированная версия shipments по дате created_at для аналитики';
+    END IF;
+END $$;
+
+-- Создаём партиции archive / current, если их ещё нет
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'app'
+          AND c.relname = 'shipments_p_archive'
+    ) THEN
+        EXECUTE $cte$
+            CREATE TABLE app.shipments_p_archive
+                PARTITION OF app.shipments_partitioned
+                FOR VALUES FROM (MINVALUE) TO ('2026-01-01'::timestamp)
+        $cte$;
+
+        COMMENT ON TABLE app.shipments_p_archive IS
+        'Архивная партиция shipments (старые периоды)';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'app'
+          AND c.relname = 'shipments_p_current'
+    ) THEN
+        EXECUTE $cte$
+            CREATE TABLE app.shipments_p_current
+                PARTITION OF app.shipments_partitioned
+                FOR VALUES FROM ('2026-01-01'::timestamp) TO (MAXVALUE)
+        $cte$;
+
+        COMMENT ON TABLE app.shipments_p_current IS
+        'Текущая партиция shipments (последний период / текущие данные)';
+    END IF;
+END $$;
+
+-- Индексы на текущей партиции под типичные аналитические запросы
+CREATE INDEX IF NOT EXISTS idx_shipments_p_current_created_sender
+    ON app.shipments_p_current (created_at, sender_id);
+
+CREATE INDEX IF NOT EXISTS idx_shipments_p_current_type_created
+    ON app.shipments_p_current (shipment_type_id, created_at);
+
+-- Перенос (копирование) данных из основной таблицы в секционированную,
+-- только тех записей, которых там ещё нет.
+INSERT INTO app.shipments_partitioned
+SELECT s.*
+FROM app.shipments s
+LEFT JOIN app.shipments_partitioned sp
+       ON sp.id = s.id
+WHERE sp.id IS NULL;
+
+-- 13.2. ИЗМЕНЕНИЯ СХЕМЫ ПОД МАРКЕТИНГОВЫЕ РЕШЕНИЯ
+
+-- Уровень лояльности клиента (VIP)
+ALTER TABLE app.users
+    ADD COLUMN IF NOT EXISTS vip_level SMALLINT NOT NULL DEFAULT 0;
+
+COMMENT ON COLUMN app.users.vip_level IS
+'Уровень лояльности клиента (0 = обычный, 1 = высокий, 2 = премиум)';
+
+-- Маркетинговая скидка на тип отправления
+ALTER TABLE ref.shipment_types
+    ADD COLUMN IF NOT EXISTS marketing_discount_percent NUMERIC(5,2) NOT NULL DEFAULT 0;
+
+COMMENT ON COLUMN ref.shipment_types.marketing_discount_percent IS
+'Маркетинговая скидка на тип отправления, %';
+
+-- Заполнение vip_level на основании LTV (Lifetime Value)
+WITH user_ltv AS (
+    SELECT
+        s.sender_id      AS user_id,
+        SUM(s.price)     AS ltv
+    FROM app.shipments_partitioned s
+    GROUP BY s.sender_id
+)
+UPDATE app.users u
+SET vip_level = CASE
+    WHEN l.ltv >= 800 THEN 2       -- premium
+    WHEN l.ltv >= 300 THEN 1       -- high
+    ELSE 0                         -- обычный
+END
+FROM user_ltv l
+WHERE u.id = l.user_id;
+
+-- Назначение скидок на 3 наименее популярных типа отправлений за последний месяц
+WITH shipments_last_month AS (
+    SELECT *
+    FROM app.shipments_partitioned s
+    WHERE s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+      AND s.created_at <  date_trunc('month', CURRENT_DATE)
+),
+type_stats AS (
+    SELECT
+        s.shipment_type_id,
+        COUNT(*) AS shipments_count
+    FROM shipments_last_month s
+    GROUP BY s.shipment_type_id
+),
+least_popular AS (
+    SELECT shipment_type_id
+    FROM type_stats
+    ORDER BY shipments_count ASC
+    LIMIT 3
+)
+UPDATE ref.shipment_types t
+SET marketing_discount_percent = 15.0  -- пример: 15% скидка на «нерелевантные» услуги
+WHERE t.id IN (SELECT shipment_type_id FROM least_popular);
+
+-- 13.3. ОБРАТНАЯ СВЯЗЬ В БИЗНЕС-ЛОГИКЕ: СТАТУС КЛИЕНТА
+
+-- Фиксируем в карточке клиента:
+-- - дату последнего отправления (last_shipment_at)
+-- - факт оплаты в отчётном периоде (is_paying_last_month)
+ALTER TABLE app.users
+    ADD COLUMN IF NOT EXISTS last_shipment_at TIMESTAMP NULL;
+
+ALTER TABLE app.users
+    ADD COLUMN IF NOT EXISTS is_paying_last_month BOOLEAN NOT NULL DEFAULT false;
+
+COMMENT ON COLUMN app.users.last_shipment_at IS
+'Дата последнего отправления клиента (по данным shipments)';
+
+COMMENT ON COLUMN app.users.is_paying_last_month IS
+'Клиент совершал оплату услуг за последний месяц (для кампаний удержания/активации)';
+
+WITH user_last AS (
+    SELECT sender_id AS user_id, MAX(created_at) AS last_shipment_at
+    FROM app.shipments_partitioned
+    GROUP BY sender_id
+),
+paying_last_month AS (
+    SELECT DISTINCT sender_id AS user_id
+    FROM app.shipments_partitioned s
+    WHERE s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+      AND s.created_at <  date_trunc('month', CURRENT_DATE)
+)
+UPDATE app.users u
+SET
+    last_shipment_at = ul.last_shipment_at,
+    is_paying_last_month = EXISTS (SELECT 1 FROM paying_last_month plm WHERE plm.user_id = u.id)
+FROM user_last ul
+WHERE u.id = ul.user_id;
+

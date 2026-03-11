@@ -180,6 +180,54 @@ SELECT * FROM audit.backup_audit_logs(90); -- Архивация записей 
 docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab4_performance_analysis.sql
 ```
 
+## Лабораторная работа №5
+
+ЛР5 добавляет секционирование по дате для аналитики и маркетинговые метрики.
+
+### Применение миграции
+
+```bash
+# Применить миграцию ЛР5 (секционирование и маркетинговые поля)
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /migrate_lab5.sql
+```
+
+После применения появятся:
+- секционированная таблица `app.shipments_partitioned` с партициями `app.shipments_p_archive` и `app.shipments_p_current`;
+- колонка `vip_level` в `app.users` с заполнением по LTV (Lifetime Value);
+- колонка `marketing_discount_percent` в `ref.shipment_types` с выставлением скидок для 3 наименее популярных типов;
+- материализованное представление `app.mv_monthly_revenue_by_segment` для быстрой месячной аналитики.
+
+### Пример проверки Partition Pruning (ARPPU за последний месяц)
+
+```bash
+docker exec -it bsbd_lab1_db psql -U postgres -d bsbd_lab1
+```
+
+```sql
+EXPLAIN ANALYZE
+WITH paying_users_last_month AS (
+    SELECT DISTINCT s.sender_id AS user_id
+    FROM app.shipments_partitioned s
+    WHERE s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+      AND s.created_at <  date_trunc('month', CURRENT_DATE)
+),
+revenue_last_month AS (
+    SELECT
+        SUM(s.price) AS revenue_last_month
+    FROM app.shipments_partitioned s
+    WHERE s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+      AND s.created_at <  date_trunc('month', CURRENT_DATE)
+)
+SELECT
+    r.revenue_last_month / GREATEST(COUNT(p.user_id), 1)::numeric AS arppu,
+    r.revenue_last_month AS revenue_last_month,
+    COUNT(p.user_id)     AS paying_users
+FROM paying_users_last_month p
+CROSS JOIN revenue_last_month r;
+```
+
+В плане выполнения будет видно, что сканируется только партиция `app.shipments_p_current`, а архивная игнорируется (Partition Pruning).
+
 ## Остановка системы
 
 ```bash
