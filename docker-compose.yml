@@ -12,6 +12,7 @@ services:
       # init scripts are executed in alphabetical order, so 10_... runs before 20_...
       - ./init.sql:/docker-entrypoint-initdb.d/10_init.sql
       - ./migrate_lab5.sql:/docker-entrypoint-initdb.d/20_migrate_lab5.sql
+      - ./migrate_lab6.sql:/docker-entrypoint-initdb.d/30_migrate_lab6.sql
       - ./test_security_complete.sql:/test_security_fixed.sql
       - ./test_login_logging_complete.sql:/test_login_logging_complete.sql
       - ./test_lab2_security.sql:/test_lab2_security.sql
@@ -24,6 +25,9 @@ services:
       - ./migrate_lab5.sql:/migrate_lab5.sql
       - ./lab5_metrics.sql:/lab5_metrics.sql
       - ./lab5_partition_pruning.sql:/lab5_partition_pruning.sql
+      - ./migrate_lab6.sql:/migrate_lab6.sql
+      - ./lab6_indexes.sql:/lab6_indexes.sql
+      - ./lab6_triggers_demo.sql:/lab6_triggers_demo.sql
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]

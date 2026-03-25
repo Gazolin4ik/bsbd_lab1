@@ -136,6 +136,11 @@ CREATE TABLE app.users (
 
 COMMENT ON TABLE app.users IS 'Пользователи (отправители и получатели)';
 
+-- LAB5 prerequisite: discount logic trigger reads vip_level during inserts
+-- so the column must exist before test shipments are inserted.
+ALTER TABLE app.users
+    ADD COLUMN IF NOT EXISTS vip_level SMALLINT NOT NULL DEFAULT 0;
+
 -- Таблица сотрудников
 CREATE TABLE app.employees (
     id SERIAL PRIMARY KEY,
@@ -217,12 +222,17 @@ BEGIN
     WHERE u.id = NEW.sender_id;
 
     v_vip_discount := CASE
-        WHEN v_vip_level >= 2 THEN 10.0
+        WHEN v_vip_level = 2 THEN 15.0
         WHEN v_vip_level = 1 THEN 5.0
         ELSE 0.0
     END;
 
-    v_total_discount := LEAST(v_marketing_discount + v_vip_discount, 30.0);
+    -- Маркетинговая скидка для непопулярных типов имеет приоритет.
+    -- Если она не нулевая, VIP-скидка сверху не добавляется.
+    v_total_discount := CASE
+        WHEN v_marketing_discount > 0 THEN LEAST(v_marketing_discount, 30.0)
+        ELSE LEAST(v_vip_discount, 30.0)
+    END;
 
     NEW.discount_percent_applied := v_total_discount;
     NEW.price_final := ROUND(NEW.price_original * (1 - (v_total_discount / 100.0)), 2);
@@ -551,13 +561,25 @@ INSERT INTO ref.shipment_types (code, name, max_weight, base_price) VALUES
 ('LETTER', 'Letter', 0.1, 50.00),
 ('PARCEL', 'Parcel', 20.0, 200.00),
 ('REGISTERED', 'Registered letter', 0.1, 100.00),
-('EXPRESS', 'Express shipment', 5.0, 500.00);
+('EXPRESS', 'Express shipment', 5.0, 500.00),
+('ECONOMY', 'Economy delivery', 1.0, 70.00),
+('BULK', 'Bulk delivery', 15.0, 180.00),
+('FRAGILE', 'Fragile delivery', 2.0, 150.00),
+('INTL', 'International shipment', 4.0, 300.00),
+('RETURN', 'Return service', 0.5, 90.00),
+('POSTPACK', 'Postpack delivery', 7.0, 220.00);
 
 -- Set realistic delivery SLAs per service type
 UPDATE ref.shipment_types SET sla_days = 7 WHERE code = 'LETTER';
 UPDATE ref.shipment_types SET sla_days = 10 WHERE code = 'PARCEL';
 UPDATE ref.shipment_types SET sla_days = 5 WHERE code = 'REGISTERED';
 UPDATE ref.shipment_types SET sla_days = 2 WHERE code = 'EXPRESS';
+UPDATE ref.shipment_types SET sla_days = 7 WHERE code = 'ECONOMY';
+UPDATE ref.shipment_types SET sla_days = 12 WHERE code = 'BULK';
+UPDATE ref.shipment_types SET sla_days = 6 WHERE code = 'FRAGILE';
+UPDATE ref.shipment_types SET sla_days = 9 WHERE code = 'INTL';
+UPDATE ref.shipment_types SET sla_days = 8 WHERE code = 'RETURN';
+UPDATE ref.shipment_types SET sla_days = 10 WHERE code = 'POSTPACK';
 
 -- Отделения
 INSERT INTO app.offices (office_number, address, office_type_id, phone) VALUES
@@ -583,7 +605,9 @@ INSERT INTO app.users (email, phone, passport_data) VALUES
 ('volkova@yandex.ru', '+7-977-777-77-77', 'encrypted_7'),
 ('fedorov@gmail.com', '+7-988-888-88-88', 'encrypted_8'),
 ('belova@mail.ru', '+7-999-999-99-99', 'encrypted_9'),
-('nikitin@yandex.ru', '+7-910-000-00-00', 'encrypted_10');
+('nikitin@yandex.ru', '+7-910-000-00-00', 'encrypted_10'),
+('gray@mail.ru', '+7-911-222-22-22', 'encrypted_11'),
+('white@gmail.com', '+7-922-333-33-33', 'encrypted_12');
 
 -- Сотрудники
 INSERT INTO app.employees (office_id, first_name, last_name, position_id, hire_date) VALUES
@@ -620,13 +644,32 @@ INSERT INTO app.shipments (
 ('TRK007', 5, 7, 3, 8, 1, 0.09, NULL, 60.00, '2026-02-10 09:15:00', '2026-02-10 09:15:00'),
 ('TRK008', 6, 8, 4, 9, 2, 5.0, 12000.00, 300.00, '2026-02-15 14:20:00', '2026-02-15 14:20:00'),
 ('TRK009', 7, 9, 5, 10, 3, 0.1, 2000.00, 150.00, '2026-02-18 16:45:00', '2026-02-18 16:45:00'),
-('TRK010', 8, 5, 6, 1, 4, 4.5, 25000.00, 700.00, '2026-02-22 11:05:00', '2026-02-22 11:05:00');
+('TRK010', 8, 5, 6, 1, 4, 4.5, 25000.00, 700.00, '2026-02-22 11:05:00', '2026-02-22 11:05:00'),
+-- new shipment types (ids 5..10) in reporting month
+('TRK011', 1, 2, 11, 2, 5, 0.5, 500.00, 80.00, '2026-02-11 10:00:00', '2026-02-11 10:00:00'),
+('TRK012', 2, 3, 12, 3, 6, 10.0, 5000.00, 260.00, '2026-02-12 11:30:00', '2026-02-12 11:30:00'),
+('TRK013', 3, 4, 11, 4, 7, 1.5, 3000.00, 180.00, '2026-02-13 13:10:00', '2026-02-13 13:10:00'),
+('TRK014', 5, 6, 12, 5, 8, 3.0, 8000.00, 320.00, '2026-02-14 09:45:00', '2026-02-14 09:45:00'),
+('TRK015', 6, 7, 11, 6, 9, 0.2, 600.00, 120.00, '2026-02-20 15:20:00', '2026-02-20 15:20:00'),
+('TRK016', 7, 8, 12, 1, 10, 4.5, 7000.00, 250.00, '2026-02-21 08:25:00', '2026-02-21 08:25:00'),
+-- extra shipments to make some types truly popular in the last month
+('TRK017', 2, 3, 12, 2, 6, 10.0, 6000.00, 300.00, '2026-02-25 10:00:00', '2026-02-25 10:00:00'),
+('TRK018', 2, 4, 11, 3, 6, 8.0, 4000.00, 220.00, '2026-02-26 11:30:00', '2026-02-26 11:30:00'),
+('TRK019', 3, 5, 3, 4, 7, 1.8, 2500.00, 160.00, '2026-02-27 09:10:00', '2026-02-27 09:10:00'),
+('TRK020', 4, 6, 4, 5, 5, 0.6, 700.00, 70.00, '2026-02-28 13:00:00', '2026-02-28 13:00:00'),
+-- Add shipments for VIP senders 1 and 2 in the reporting month
+('TRK021', 1, 2, 1, 2, 5, 1.0, NULL, 100.00, '2026-02-19 12:00:00', '2026-02-19 12:00:00'),
+('TRK022', 2, 3, 2, 4, 6, 2.2, NULL, 120.00, '2026-02-20 16:00:00', '2026-02-20 16:00:00');
 
 -- Fill delivered_at for a mix of on-time and late deliveries (report-ready SLA examples)
 UPDATE app.shipments SET delivered_at = created_at + interval '6 days' WHERE tracking_number = 'TRK007';  -- Letter, on time (SLA 7)
 UPDATE app.shipments SET delivered_at = created_at + interval '12 days' WHERE tracking_number = 'TRK008'; -- Parcel, late (SLA 10)
 UPDATE app.shipments SET delivered_at = created_at + interval '3 days' WHERE tracking_number = 'TRK009';  -- Registered, on time (SLA 5)
 UPDATE app.shipments SET delivered_at = created_at + interval '1 day' WHERE tracking_number = 'TRK010';   -- Express, on time (SLA 2)
+UPDATE app.shipments SET delivered_at = created_at + interval '10 days' WHERE tracking_number = 'TRK017'; -- BULK, on time (SLA 12)
+UPDATE app.shipments SET delivered_at = created_at + interval '15 days' WHERE tracking_number = 'TRK018'; -- BULK, late
+UPDATE app.shipments SET delivered_at = created_at + interval '5 days' WHERE tracking_number = 'TRK019';  -- FRAGILE, on time (SLA 6)
+UPDATE app.shipments SET delivered_at = created_at + interval '6 days' WHERE tracking_number = 'TRK020';  -- ECONOMY, on time (SLA 7)
 
 -- Маршруты
 INSERT INTO app.delivery_routes (shipment_id, office_id, sequence_order, planned_arrival, status) VALUES
@@ -642,7 +685,19 @@ INSERT INTO app.delivery_routes (shipment_id, office_id, sequence_order, planned
 (7, 5, 1, '2026-01-11 10:00:00', 'completed'),
 (8, 6, 1, '2026-01-16 15:00:00', 'completed'),
 (9, 7, 1, '2026-01-19 17:00:00', 'pending'),
-(10, 8, 1, '2026-01-23 12:00:00', 'pending');
+(10, 8, 1, '2026-01-23 12:00:00', 'pending'),
+-- new routes for shipments 11..16
+(11, 1, 1, '2026-02-17 10:00:00', 'completed'),
+(12, 2, 1, '2026-02-18 12:30:00', 'pending'),
+(13, 3, 1, '2026-02-19 15:00:00', 'completed'),
+(14, 5, 1, '2026-02-22 09:00:00', 'pending'),
+(15, 6, 1, '2026-02-24 15:20:00', 'completed'),
+(16, 7, 1, '2026-02-27 08:25:00', 'pending'),
+-- new routes for shipments 17..20
+(17, 2, 1, '2026-03-06 10:00:00', 'completed'),
+(18, 2, 1, '2026-03-08 11:30:00', 'pending'),
+(19, 3, 1, '2026-03-04 09:10:00', 'completed'),
+(20, 4, 1, '2026-03-05 13:00:00', 'completed');
 
 -- Операции
 INSERT INTO app.shipment_operations (shipment_id, employee_id, operation_type, location, notes) VALUES
@@ -656,7 +711,19 @@ INSERT INTO app.shipment_operations (shipment_id, employee_id, operation_type, l
 (7, 5, 'acceptance', 'MOS003', 'Last-month shipment accepted'),
 (8, 6, 'acceptance', 'MOS004', 'Last-month parcel accepted'),
 (9, 9, 'acceptance', 'NOV002', 'Last-month registered letter accepted'),
-(10, 2, 'acceptance', 'MOS001', 'Large last-month express shipment accepted');
+(10, 2, 'acceptance', 'MOS001', 'Large last-month express shipment accepted'),
+-- operations for shipments 11..16
+(11, 2, 'acceptance', 'MOS001', 'Economy delivery accepted'),
+(12, 3, 'acceptance', 'MOS002', 'Bulk delivery accepted'),
+(13, 4, 'acceptance', 'SPB001', 'Fragile delivery accepted'),
+(14, 7, 'acceptance', 'SPB002', 'International shipment accepted'),
+(15, 8, 'acceptance', 'SPB003', 'Return service accepted'),
+(16, 9, 'acceptance', 'NOV002', 'Postpack delivery accepted'),
+-- operations for shipments 17..20
+(17, 2, 'acceptance', 'MOS002', 'Bulk delivery accepted'),
+(18, 3, 'acceptance', 'MOS002', 'Bulk delivery (second) accepted'),
+(19, 4, 'acceptance', 'SPB001', 'Fragile delivery accepted'),
+(20, 5, 'acceptance', 'MOS003', 'Economy delivery accepted');
 
 -- Соответствия пользователей
 -- segment_id будет заполнен позже в разделе ЛР3 после добавления segment_id в employees
@@ -2063,7 +2130,10 @@ END
 FROM user_ltv l
 WHERE u.id = l.user_id;
 
--- Назначение скидок на 3 наименее популярных типа отправлений за последний месяц
+-- 2-е решение: маркетинговая скидка на непопулярные типы за последний месяц (10%)
+UPDATE ref.shipment_types
+SET marketing_discount_percent = 0;
+
 WITH shipments_last_month AS (
     SELECT *
     FROM app.shipments_partitioned s
@@ -2084,8 +2154,26 @@ least_popular AS (
     LIMIT 3
 )
 UPDATE ref.shipment_types t
-SET marketing_discount_percent = 15.0  -- пример: 15% скидка на «нерелевантные» услуги
+SET marketing_discount_percent = 10.0
 WHERE t.id IN (SELECT shipment_type_id FROM least_popular);
+
+-- Пересчитать скидку в карточках shipments за последний месяц
+UPDATE app.shipments s
+SET price = s.price
+WHERE s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+  AND s.created_at <  date_trunc('month', CURRENT_DATE);
+
+-- Синхронизировать секционированную таблицу для аналитики
+UPDATE app.shipments_partitioned sp
+SET
+    price_original = s.price_original,
+    discount_percent_applied = s.discount_percent_applied,
+    price_final = s.price_final,
+    price = s.price
+FROM app.shipments s
+WHERE sp.id = s.id
+  AND s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+  AND s.created_at <  date_trunc('month', CURRENT_DATE);
 
 -- 13.3. ОБРАТНАЯ СВЯЗЬ В БИЗНЕС-ЛОГИКЕ: СТАТУС КЛИЕНТА
 

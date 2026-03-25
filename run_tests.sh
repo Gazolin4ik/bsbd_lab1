@@ -60,6 +60,17 @@ elif [ "$TEST_TYPE" = "lab5" ]; then
     echo "Комментарий: в плане есть только обращения к app.shipments_p_current."
     echo "Архивная партиция app.shipments_p_archive не используется, что демонстрирует Partition Pruning."
     echo ""
+elif [ "$TEST_TYPE" = "lab6" ]; then
+    echo "=========================================="
+    echo "ЛР2: ИНДЕКСЫ (EXPLAIN ANALYZE ДО/ПОСЛЕ)"
+    echo "=========================================="
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab6_indexes.sql
+    echo ""
+    echo "=========================================="
+    echo "ЛР2: ДЕМОНСТРАЦИЯ ТРИГГЕРОВ"
+    echo "=========================================="
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab6_triggers_demo.sql
+    echo ""
 else
     echo "Использование:"
     echo "  ./run_tests.sh           - тесты безопасности (задания 1-3)"
@@ -68,6 +79,7 @@ else
     echo "  ./run_tests.sh lab3      - тесты построчной изоляции данных с RLS (ЛР3)"
     echo "  ./run_tests.sh lab4      - тесты безопасных представлений и аудита (ЛР4)"
     echo "  ./run_tests.sh lab5      - расчёт метрик и демонстрация секционирования (ЛР5)"
+    echo "  ./run_tests.sh lab6      - индексы и триггеры (ЛР2)"
     exit 1
 fi
 

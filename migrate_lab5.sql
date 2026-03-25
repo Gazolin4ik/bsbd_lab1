@@ -209,12 +209,17 @@ BEGIN
     WHERE u.id = NEW.sender_id;
 
     v_vip_discount := CASE
-        WHEN v_vip_level >= 2 THEN 10.0
+        WHEN v_vip_level = 2 THEN 15.0
         WHEN v_vip_level = 1 THEN 5.0
         ELSE 0.0
     END;
 
-    v_total_discount := LEAST(v_marketing_discount + v_vip_discount, 30.0);
+    -- Маркетинговая скидка для непопулярных типов имеет приоритет.
+    -- Если она не нулевая, VIP-скидка сверху не добавляется.
+    v_total_discount := CASE
+        WHEN v_marketing_discount > 0 THEN LEAST(v_marketing_discount, 30.0)
+        ELSE LEAST(v_vip_discount, 30.0)
+    END;
 
     NEW.discount_percent_applied := v_total_discount;
     NEW.price_final := ROUND(NEW.price_original * (1 - (v_total_discount / 100.0)), 2);
@@ -248,7 +253,15 @@ END
 FROM user_ltv l
 WHERE u.id = l.user_id;
 
--- 2.4. Назначение скидок на 3 наименее популярных типа отправлений
+-- 2.4. Маркетинговая скидка на непопулярные типы за последний месяц (10%)
+UPDATE app.shipments s
+SET price = s.price
+WHERE s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+  AND s.created_at <  date_trunc('month', CURRENT_DATE);
+
+UPDATE ref.shipment_types
+SET marketing_discount_percent = 0;
+
 WITH shipments_last_month AS (
     SELECT *
     FROM app.shipments_partitioned s
@@ -269,8 +282,26 @@ least_popular AS (
     LIMIT 3
 )
 UPDATE ref.shipment_types t
-SET marketing_discount_percent = 15.0  -- пример: 15% скидка на «нерелевантные» услуги
+SET marketing_discount_percent = 10.0
 WHERE t.id IN (SELECT shipment_type_id FROM least_popular);
+
+-- Пересчитать скидку в карточках shipments за последний месяц
+UPDATE app.shipments s
+SET price = s.price
+WHERE s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+  AND s.created_at <  date_trunc('month', CURRENT_DATE);
+
+-- Синхронизировать секционированную таблицу для аналитики
+UPDATE app.shipments_partitioned sp
+SET
+    price_original = s.price_original,
+    discount_percent_applied = s.discount_percent_applied,
+    price_final = s.price_final,
+    price = s.price
+FROM app.shipments s
+WHERE sp.id = s.id
+  AND s.created_at >= date_trunc('month', CURRENT_DATE) - interval '1 month'
+  AND s.created_at <  date_trunc('month', CURRENT_DATE);
 
 -- =============================================
 -- 3. ОБРАТНАЯ СВЯЗЬ В БИЗНЕС-ЛОГИКЕ: СТАТУС КЛИЕНТА
