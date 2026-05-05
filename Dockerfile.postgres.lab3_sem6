@@ -1,0 +1,55 @@
+FROM postgres:15-alpine
+
+RUN apk add --no-cache openssl gnupg
+
+# ---------- SSL (self-signed) ----------
+RUN mkdir -p /etc/postgresql/ssl && \
+    openssl req -x509 -newkey rsa:4096 -nodes \
+      -keyout /etc/postgresql/ssl/server.key \
+      -out /etc/postgresql/ssl/server.crt \
+      -days 3650 \
+      -subj "/CN=bsbd_lab1_ssl" && \
+    chown -R postgres:postgres /etc/postgresql/ssl && \
+    chmod 600 /etc/postgresql/ssl/server.key && \
+    chmod 644 /etc/postgresql/ssl/server.crt
+
+# ---------- Encryption keys (PGP + symmetric) ----------
+RUN mkdir -p /etc/postgresql/keys && chown -R postgres:postgres /etc/postgresql/keys && chmod 700 /etc/postgresql/keys
+
+# Symmetric key stored as a server-side file (demo purposes)
+RUN openssl rand -hex 32 > /etc/postgresql/keys/lab3_sem6_sym.key && \
+    chown postgres:postgres /etc/postgresql/keys/lab3_sem6_sym.key && \
+    chmod 600 /etc/postgresql/keys/lab3_sem6_sym.key
+
+# Generate an OpenPGP keypair for pgcrypto pgp_pub_encrypt/pgp_pub_decrypt demos.
+# No passphrase is used to keep the lab reproducible.
+RUN mkdir -p /tmp/gnupg && chmod 700 /tmp/gnupg
+ENV GNUPGHOME=/tmp/gnupg
+RUN cat > /tmp/lab3_sem6_pgp_keyparams <<'EOF'
+Key-Type: RSA
+Key-Length: 2048
+Key-Usage: sign
+Subkey-Type: RSA
+Subkey-Length: 2048
+Subkey-Usage: encrypt
+Name-Real: lab3-sem6
+Name-Email: lab3-sem6@example.com
+Expire-Date: 0
+%no-protection
+%commit
+EOF
+
+RUN gpg --batch --generate-key /tmp/lab3_sem6_pgp_keyparams \
+ && gpg --armor --export "lab3-sem6@example.com" > /etc/postgresql/keys/lab3_sem6_pub.asc \
+ && gpg --armor --export-secret-keys "lab3-sem6@example.com" > /etc/postgresql/keys/lab3_sem6_priv.asc \
+ && chown postgres:postgres /etc/postgresql/keys/lab3_sem6_pub.asc /etc/postgresql/keys/lab3_sem6_priv.asc \
+ && chmod 644 /etc/postgresql/keys/lab3_sem6_pub.asc \
+ && chmod 600 /etc/postgresql/keys/lab3_sem6_priv.asc \
+ && rm -rf /tmp/gnupg /tmp/lab3_sem6_pgp_keyparams
+
+ENV GNUPGHOME=
+
+# ---------- PostgreSQL config ----------
+COPY lab3_sem6_postgresql.conf /etc/postgresql/lab3_sem6_postgresql.conf
+COPY lab3_sem6_pg_hba.conf /etc/postgresql/lab3_sem6_pg_hba.conf
+

@@ -71,6 +71,34 @@ elif [ "$TEST_TYPE" = "lab6" ]; then
     echo "=========================================="
     docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab6_triggers_demo.sql
     echo ""
+elif [ "$TEST_TYPE" = "lab3_sem6" ]; then
+    echo "=========================================="
+    echo "ЛР3 (SEM6): ШИФРОВАНИЕ (пароли, pgcrypto, SSL, производительность)"
+    echo "=========================================="
+    # Wait for final PostgreSQL startup (init process does a temporary start + fast shutdown)
+    for i in $(seq 1 90); do
+        if docker exec bsbd_lab1_db pg_isready -U postgres -d bsbd_lab1 > /dev/null 2>&1 && \
+           docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -tAc "select to_regclass('app.lab3_sem6_users_secure') is not null;" 2>/dev/null | grep -q t; then
+            break
+        fi
+        sleep 1
+    done
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab3_sem6_demo.sql
+    echo ""
+    echo "------------------------------------------"
+    echo "SSL CHECK (TCP connection, must be SSL)"
+    echo "------------------------------------------"
+    docker exec bsbd_lab1_db psql "postgresql://postgres:123@localhost:5432/bsbd_lab1?sslmode=require" -c "\\conninfo" || true
+    echo ""
+    echo "------------------------------------------"
+    echo "TASK 5 (NETWORK PERF): local(no SSL) vs TCP+SSL"
+    echo "------------------------------------------"
+    echo "LOCAL (unix socket, no SSL):"
+    docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -v ON_ERROR_STOP=1 -f /lab3_sem6_network_perf.sql
+    echo ""
+    echo "TCP + SSL:"
+    docker exec bsbd_lab1_db psql "postgresql://postgres:123@localhost:5432/bsbd_lab1?sslmode=require" -v ON_ERROR_STOP=1 -f /lab3_sem6_network_perf.sql
+    echo ""
 else
     echo "Использование:"
     echo "  ./run_tests.sh           - тесты безопасности (задания 1-3)"
@@ -80,6 +108,7 @@ else
     echo "  ./run_tests.sh lab4      - тесты безопасных представлений и аудита (ЛР4)"
     echo "  ./run_tests.sh lab5      - расчёт метрик и демонстрация секционирования (ЛР5)"
     echo "  ./run_tests.sh lab6      - индексы и триггеры (ЛР2)"
+    echo "  ./run_tests.sh lab3_sem6 - ЛР3 SEM6: шифрование (пароли/pgcrypto/SSL)"
     exit 1
 fi
 
