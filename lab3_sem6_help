@@ -1,0 +1,68 @@
+# LAB3_SEM6 HELP
+
+# Запуск/пересборка проекта
+docker compose up -d --build
+
+# Остановка контейнеров
+docker compose down
+
+# Полная очистка (контейнеры + volume с данными)
+docker compose down -v
+
+
+# Проверить, что контейнер БД работает
+docker ps --filter "name=bsbd_lab1_db"
+
+# Проверить готовность PostgreSQL в контейнере
+docker exec bsbd_lab1_db pg_isready -U postgres -d bsbd_lab1
+
+
+# Вывести симметричный ключ (для pgp_sym_decrypt в pgAdmin)
+docker exec bsbd_lab1_db cat /etc/postgresql/keys/lab3_sem6_sym.key
+
+# Вывести публичный PGP ключ (для понимания, чем шифруется pgp_pub_encrypt)
+docker exec bsbd_lab1_db cat /etc/postgresql/keys/lab3_sem6_pub.asc
+
+# Вывести приватный PGP ключ (для pgp_pub_decrypt в pgAdmin)
+docker exec bsbd_lab1_db cat /etc/postgresql/keys/lab3_sem6_priv.asc
+
+
+# Проверка: SSL включен/выключен на сервере
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -c "show ssl;"
+
+# Проверка путей к сертификату и ключу SSL
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -c "show ssl_cert_file;"
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -c "show ssl_key_file;"
+
+# Проверка защищенного подключения (должно показать SSL connection ...)
+docker exec bsbd_lab1_db psql "postgresql://postgres:123@localhost:5432/bsbd_lab1?sslmode=require" -c "\conninfo"
+
+# Проверка незащищенного подключения (в режиме hostnossl reject должно быть отклонено)
+docker exec bsbd_lab1_db psql "postgresql://postgres:123@localhost:5432/bsbd_lab1?sslmode=disable" -c "select 1;"
+
+
+# Запустить полный demo-скрипт ЛР3 sem6
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab3_sem6_demo.sql
+
+# Запустить только сетевой бенчмарк (копирование payload и вывод времени)
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /lab3_sem6_network_perf.sql
+
+# Сетевой бенчмарк через SSL
+docker exec bsbd_lab1_db psql "postgresql://postgres:123@localhost:5432/bsbd_lab1?sslmode=require" -f /lab3_sem6_network_perf.sql
+
+# Сетевой бенчмарк без SSL (использовать только когда ssl=off и pg_hba разрешает host)
+docker exec bsbd_lab1_db psql "postgresql://postgres:123@localhost:5432/bsbd_lab1?sslmode=disable" -f /lab3_sem6_network_perf.sql
+
+
+# Применить миграцию ЛР3 sem6 вручную (если нужно повторно добавить колонки/таблицы)
+docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -f /docker-entrypoint-initdb.d/25_lab3_sem6_migrate.sql
+
+# Посмотреть логи контейнера PostgreSQL
+docker logs --tail=200 bsbd_lab1_db
+
+
+# Перезапустить только PostgreSQL контейнер
+docker compose restart postgres
+
+# Важно: если менялись файлы lab3_sem6_postgresql.conf / lab3_sem6_pg_hba.conf, нужен rebuild
+docker compose up -d --build postgres
