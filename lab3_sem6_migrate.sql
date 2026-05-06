@@ -6,26 +6,22 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- 1) Secure copies for column encryption demos (do not break existing app tables)
-CREATE TABLE IF NOT EXISTS app.lab3_sem6_users_secure (
-    user_id INTEGER PRIMARY KEY REFERENCES app.users(id),
-    email TEXT,
-    phone_cipher_sym BYTEA,
-    passport_cipher_pub BYTEA,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+-- Task 2 requires using existing tables: app.users + app.offices
+-- We store ciphertext in additional columns (BYTEA) to avoid breaking existing app logic.
 
-COMMENT ON TABLE app.lab3_sem6_users_secure IS 'LAB3_SEM6: encrypted copies of users sensitive fields (sym + PGP public key)';
+ALTER TABLE app.users
+    ADD COLUMN IF NOT EXISTS phone_cipher_sym BYTEA,
+    ADD COLUMN IF NOT EXISTS passport_cipher_pub BYTEA;
 
-CREATE TABLE IF NOT EXISTS app.lab3_sem6_offices_secure (
-    office_id INTEGER PRIMARY KEY REFERENCES app.offices(id),
-    office_number TEXT,
-    address_cipher_sym BYTEA,
-    phone_cipher_sym BYTEA,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+COMMENT ON COLUMN app.users.phone_cipher_sym IS 'LAB3_SEM6: phone encrypted with symmetric PGP (pgcrypto)';
+COMMENT ON COLUMN app.users.passport_cipher_pub IS 'LAB3_SEM6: passport_data encrypted with PGP public key (pgcrypto)';
 
-COMMENT ON TABLE app.lab3_sem6_offices_secure IS 'LAB3_SEM6: encrypted copies of offices sensitive fields (sym)';
+ALTER TABLE app.employees
+    ADD COLUMN IF NOT EXISTS first_name_cipher_sym BYTEA,
+    ADD COLUMN IF NOT EXISTS last_name_cipher_sym BYTEA;
+
+COMMENT ON COLUMN app.employees.first_name_cipher_sym IS 'LAB3_SEM6: first_name encrypted with symmetric PGP (pgcrypto)';
+COMMENT ON COLUMN app.employees.last_name_cipher_sym IS 'LAB3_SEM6: last_name encrypted with symmetric PGP (pgcrypto)';
 
 -- 3) Performance benchmark tables (plaintext vs encrypted)
 CREATE TABLE IF NOT EXISTS app.lab3_sem6_perf_plain (
@@ -43,10 +39,7 @@ CREATE TABLE IF NOT EXISTS app.lab3_sem6_perf_enc (
 COMMENT ON TABLE app.lab3_sem6_perf_plain IS 'LAB3_SEM6: perf dataset plaintext';
 COMMENT ON TABLE app.lab3_sem6_perf_enc IS 'LAB3_SEM6: perf dataset encrypted (pgp_sym_encrypt)';
 
--- 2) Populate encrypted demo tables (idempotent refresh)
--- Data population is done by /lab3_sem6_demo.sql because
--- PostgreSQL server-side pg_read_file() is restricted to data_directory,
--- while the demo reads keys from container files on the psql (client) side.
+-- Ciphertext population is done by /lab3_sem6_demo.sql (client-side key loading).
 
 COMMIT;
 

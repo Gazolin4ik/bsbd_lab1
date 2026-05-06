@@ -1,0 +1,18 @@
+#postgresql.conf
+listen_addresses = '*'
+password_encryption = 'scram-sha-256'
+
+ssl = on
+ssl_cert_file = '/etc/postgresql/ssl/server.crt'
+ssl_key_file  = '/etc/postgresql/ssl/server.key'
+
+hba_file = '/etc/postgresql/lab3_sem6_pg_hba.conf'
+
+#pg_hba.conf
+local   all             all                                     trust
+hostssl all             all             0.0.0.0/0               scram-sha-256
+hostssl all             all             ::/0                    scram-sha-256
+hostnossl all           all             0.0.0.0/0               reject
+hostnossl all           all             ::/0                    reject
+
+

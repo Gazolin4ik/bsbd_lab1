@@ -77,40 +77,31 @@ FROM keys;
 
 \echo ''
 \echo '--- Populate encrypted demo tables (ciphertext) ---'
-TRUNCATE TABLE app.lab3_sem6_users_secure;
-TRUNCATE TABLE app.lab3_sem6_offices_secure;
-
 WITH keys AS (
     SELECT
         (SELECT btrim(string_agg(line, E'\n')) FROM lab3_sem6__symkey) AS sym_key,
         dearmor((SELECT string_agg(line, E'\n') FROM lab3_sem6__pubkey)) AS pub_key
 )
-INSERT INTO app.lab3_sem6_users_secure (user_id, email, phone_cipher_sym, passport_cipher_pub)
-SELECT
-    u.id,
-    u.email,
-    CASE WHEN u.phone IS NULL THEN NULL
-         ELSE pgp_sym_encrypt(u.phone, keys.sym_key, 'cipher-algo=aes256, compress-algo=1')
+UPDATE app.users u
+SET
+    phone_cipher_sym = CASE
+        WHEN u.phone IS NULL THEN NULL
+        ELSE pgp_sym_encrypt(u.phone, keys.sym_key, 'cipher-algo=aes256, compress-algo=1')
     END,
-    CASE WHEN u.passport_data IS NULL THEN NULL
-         ELSE pgp_pub_encrypt(u.passport_data, keys.pub_key, 'cipher-algo=aes256, compress-algo=1')
+    passport_cipher_pub = CASE
+        WHEN u.passport_data IS NULL THEN NULL
+        ELSE pgp_pub_encrypt(u.passport_data, keys.pub_key, 'cipher-algo=aes256, compress-algo=1')
     END
-FROM app.users u
-CROSS JOIN keys;
+FROM keys;
 
 WITH keys AS (
     SELECT (SELECT btrim(string_agg(line, E'\n')) FROM lab3_sem6__symkey) AS sym_key
 )
-INSERT INTO app.lab3_sem6_offices_secure (office_id, office_number, address_cipher_sym, phone_cipher_sym)
-SELECT
-    o.id,
-    o.office_number,
-    pgp_sym_encrypt(o.address, keys.sym_key, 'cipher-algo=aes256, compress-algo=1'),
-    CASE WHEN o.phone IS NULL THEN NULL
-         ELSE pgp_sym_encrypt(o.phone, keys.sym_key, 'cipher-algo=aes256, compress-algo=1')
-    END
-FROM app.offices o
-CROSS JOIN keys;
+UPDATE app.employees e
+SET
+    first_name_cipher_sym = pgp_sym_encrypt(e.first_name, keys.sym_key, 'cipher-algo=aes256, compress-algo=1'),
+    last_name_cipher_sym = pgp_sym_encrypt(e.last_name, keys.sym_key, 'cipher-algo=aes256, compress-algo=1')
+FROM keys;
 
 \echo ''
 \echo '--- Prepare performance dataset (plaintext vs encrypted) ---'
@@ -135,9 +126,18 @@ CROSS JOIN keys;
 
 \echo ''
 \echo '--- Encrypted data without passing any key (ciphertext) ---'
-SELECT user_id, email, phone_cipher_sym, passport_cipher_pub
-FROM app.lab3_sem6_users_secure
-ORDER BY user_id
+SELECT id AS user_id, email, phone_cipher_sym, passport_cipher_pub
+FROM app.users
+WHERE phone_cipher_sym IS NOT NULL OR passport_cipher_pub IS NOT NULL
+ORDER BY id
+LIMIT 5;
+
+\echo ''
+\echo '--- Encrypted data in second existing table: app.employees (ciphertext) ---'
+SELECT id AS employee_id, first_name_cipher_sym, last_name_cipher_sym
+FROM app.employees
+WHERE first_name_cipher_sym IS NOT NULL OR last_name_cipher_sym IS NOT NULL
+ORDER BY id
 LIMIT 5;
 
 \echo ''
@@ -146,13 +146,28 @@ WITH k AS (
     SELECT (SELECT btrim(string_agg(line, E'\n')) FROM lab3_sem6__symkey) AS sym_key
 )
 SELECT
-    s.user_id,
-    s.email,
-    pgp_sym_decrypt(s.phone_cipher_sym, k.sym_key) AS phone_decrypted
-FROM app.lab3_sem6_users_secure s
+    u.id AS user_id,
+    u.email,
+    pgp_sym_decrypt(u.phone_cipher_sym, k.sym_key) AS phone_decrypted
+FROM app.users u
 CROSS JOIN k
-WHERE s.phone_cipher_sym IS NOT NULL
-ORDER BY s.user_id
+WHERE u.phone_cipher_sym IS NOT NULL
+ORDER BY u.id
+LIMIT 5;
+
+\echo ''
+\echo '--- Decrypt app.employees symmetric ciphertext (first_name/last_name) ---'
+WITH k AS (
+    SELECT (SELECT btrim(string_agg(line, E'\n')) FROM lab3_sem6__symkey) AS sym_key
+)
+SELECT
+    e.id AS employee_id,
+    pgp_sym_decrypt(e.first_name_cipher_sym, k.sym_key) AS first_name_decrypted,
+    pgp_sym_decrypt(e.last_name_cipher_sym, k.sym_key) AS last_name_decrypted
+FROM app.employees e
+CROSS JOIN k
+WHERE e.first_name_cipher_sym IS NOT NULL
+ORDER BY e.id
 LIMIT 5;
 
 \echo ''
@@ -161,13 +176,13 @@ WITH priv AS (
     SELECT dearmor((SELECT string_agg(line, E'\n') FROM lab3_sem6__privkey)) AS priv_key
 )
 SELECT
-    s.user_id,
-    s.email,
-    pgp_pub_decrypt(s.passport_cipher_pub, priv.priv_key) AS passport_decrypted
-FROM app.lab3_sem6_users_secure s
+    u.id AS user_id,
+    u.email,
+    pgp_pub_decrypt(u.passport_cipher_pub, priv.priv_key) AS passport_decrypted
+FROM app.users u
 CROSS JOIN priv
-WHERE s.passport_cipher_pub IS NOT NULL
-ORDER BY s.user_id
+WHERE u.passport_cipher_pub IS NOT NULL
+ORDER BY u.id
 LIMIT 5;
 
 \echo ''
@@ -203,16 +218,16 @@ WITH k AS (
     SELECT (SELECT btrim(string_agg(line, E'\n')) FROM lab3_sem6__symkey) AS sym_key
 ),
 sample AS (
-    SELECT pgp_sym_decrypt(s.phone_cipher_sym, k.sym_key) AS phone_value
-    FROM app.lab3_sem6_users_secure s
+    SELECT pgp_sym_decrypt(u.phone_cipher_sym, k.sym_key) AS phone_value
+    FROM app.users u
     CROSS JOIN k
-    WHERE s.phone_cipher_sym IS NOT NULL
+    WHERE u.phone_cipher_sym IS NOT NULL
     LIMIT 1
 )
-SELECT s.user_id, s.email
-FROM app.lab3_sem6_users_secure s
+SELECT u.id AS user_id, u.email
+FROM app.users u
 CROSS JOIN k
-WHERE pgp_sym_decrypt(s.phone_cipher_sym, k.sym_key) = (SELECT phone_value FROM sample);
+WHERE pgp_sym_decrypt(u.phone_cipher_sym, k.sym_key) = (SELECT phone_value FROM sample);
 
 \echo ''
 \echo '--- Perf dataset: plaintext filter by token (fast) ---'

@@ -78,7 +78,7 @@ elif [ "$TEST_TYPE" = "lab3_sem6" ]; then
     # Wait for final PostgreSQL startup (init process does a temporary start + fast shutdown)
     for i in $(seq 1 90); do
         if docker exec bsbd_lab1_db pg_isready -U postgres -d bsbd_lab1 > /dev/null 2>&1 && \
-           docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -tAc "select to_regclass('app.lab3_sem6_users_secure') is not null;" 2>/dev/null | grep -q t; then
+           docker exec bsbd_lab1_db psql -U postgres -d bsbd_lab1 -tAc "select exists (select 1 from information_schema.columns where table_schema='app' and table_name='users' and column_name='phone_cipher_sym');" 2>/dev/null | grep -q t; then
             break
         fi
         sleep 1
