@@ -42,6 +42,31 @@ services:
       timeout: 10s
       retries: 3
 
+  postgres_lab4:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres.lab4_sem6
+    container_name: bsbd_lab4_pitr_db
+    environment:
+      POSTGRES_DB: bsbd_lab1
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123
+      POSTGRES_INITDB_ARGS: "--data-checksums -E UTF8"
+    command: ["postgres", "-c", "config_file=/etc/postgresql/lab4_sem6_postgresql.conf"]
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./lab4_sem6_init.sql:/docker-entrypoint-initdb.d/10_lab4_sem6_init.sql
+      - ./lab4_sem6_verify.sql:/lab4_sem6_verify.sql
+      - postgres_lab4_data:/var/lib/postgresql/data
+      - postgres_lab4_archive:/var/lib/postgresql/archive
+      - postgres_lab4_backup:/tmp/pg_backup
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   pgadmin:
     image: dpage/pgadmin4
     container_name: bsbd_lab1_pgadmin
@@ -55,3 +80,6 @@ services:
 
 volumes:
   postgres_data:
+  postgres_lab4_data:
+  postgres_lab4_archive:
+  postgres_lab4_backup:

@@ -1,0 +1,18 @@
+FROM postgres:15-alpine
+
+RUN apk add --no-cache openssl bash coreutils gzip
+
+RUN mkdir -p /var/lib/postgresql/archive /tmp/pg_backup \
+    && chown -R postgres:postgres /var/lib/postgresql/archive /tmp/pg_backup \
+    && chmod 700 /var/lib/postgresql/archive
+
+COPY lab4_sem6_wal_pass.txt /etc/postgresql/lab4_sem6_wal_pass.txt
+COPY lab4_sem6_archive_wal.sh /usr/local/bin/lab4_sem6_archive_wal.sh
+COPY lab4_sem6_restore_wal.sh /usr/local/bin/lab4_sem6_restore_wal.sh
+COPY lab4_sem6_postgresql.conf /etc/postgresql/lab4_sem6_postgresql.conf
+COPY lab4_sem6_prepare_recovery.sh /usr/local/bin/lab4_sem6_prepare_recovery.sh
+
+RUN chown postgres:postgres /etc/postgresql/lab4_sem6_wal_pass.txt \
+    && chmod 600 /etc/postgresql/lab4_sem6_wal_pass.txt \
+    && chmod 755 /usr/local/bin/lab4_sem6_archive_wal.sh /usr/local/bin/lab4_sem6_restore_wal.sh \
+    && chmod 755 /usr/local/bin/lab4_sem6_prepare_recovery.sh

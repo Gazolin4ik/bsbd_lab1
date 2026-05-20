@@ -99,6 +99,22 @@ elif [ "$TEST_TYPE" = "lab3_sem6" ]; then
     echo "TCP + SSL:"
     docker exec bsbd_lab1_db psql "postgresql://postgres:123@localhost:5432/bsbd_lab1?sslmode=require" -v ON_ERROR_STOP=1 -f /lab3_sem6_network_perf.sql
     echo ""
+elif [ "$TEST_TYPE" = "lab4_sem6" ]; then
+    echo "=========================================="
+    echo "ЛР4 SEM6: PITR + шифрование WAL"
+    echo "=========================================="
+    docker compose up -d --build postgres_lab4
+    for _ in $(seq 1 120); do
+        if docker exec bsbd_lab4_pitr_db pg_isready -U postgres >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+    chmod +x ./lab4_sem6_pitr_demo.sh
+    ./lab4_sem6_pitr_demo.sh
+    echo ""
+    docker exec -u postgres bsbd_lab4_pitr_db psql -U postgres -d bsbd_lab1 -f /lab4_sem6_verify.sql
+    echo ""
 else
     echo "Использование:"
     echo "  ./run_tests.sh           - тесты безопасности (задания 1-3)"
@@ -109,6 +125,7 @@ else
     echo "  ./run_tests.sh lab5      - расчёт метрик и демонстрация секционирования (ЛР5)"
     echo "  ./run_tests.sh lab6      - индексы и триггеры (ЛР2)"
     echo "  ./run_tests.sh lab3_sem6 - ЛР3 SEM6: шифрование (пароли/pgcrypto/SSL)"
+    echo "  ./run_tests.sh lab4_sem6 - ЛР4 SEM6: PITR и шифрование WAL"
     exit 1
 fi
 

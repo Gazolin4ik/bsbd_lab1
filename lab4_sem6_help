@@ -1,0 +1,44 @@
+# LAB4_SEM6 — PITR и шифрование WAL
+
+## Запуск
+
+```bash
+docker compose up -d --build postgres_lab4
+# дождаться готовности (~10 с)
+./run_tests.sh lab4_sem6
+```
+
+Порт: **5434** (контейнер `bsbd_lab4_pitr_db`).  
+Пользователь/пароль: `postgres` / `123`, БД: `bsbd_lab1`.
+
+## Задание 1 (вручную)
+
+```bash
+docker exec -u postgres bsbd_lab4_pitr_db psql -U postgres -d bsbd_lab1 -c "SHOW data_checksums;"
+docker exec -u postgres bsbd_lab4_pitr_db psql -U postgres -d bsbd_lab1 -c "SHOW wal_level; SHOW archive_mode; SHOW archive_command;"
+docker exec bsbd_lab4_pitr_db ls -la /var/lib/postgresql/archive
+```
+
+## Задание 2–3 (автоматически)
+
+```bash
+./lab4_sem6_pitr_demo.sh
+```
+
+Или по шагам — см. `lab4_sem6_pitr_demo.sh`.
+
+## pgAdmin
+
+Host: localhost, Port: **5434**, Database: bsbd_lab1, User: postgres, Password: 123.
+
+## Файлы
+
+| Файл | Назначение |
+|------|------------|
+| lab4_sem6_postgresql.conf | wal_level, archive_mode, archive_command |
+| lab4_sem6_archive_wal.sh | шифрование WAL (gzip + AES-256-CBC) |
+| lab4_sem6_restore_wal.sh | расшифровка для restore_command |
+| lab4_sem6_init.sql | схема app.important_data |
+| lab4_sem6_pitr_demo.sh | полный сценарий PITR |
+
+Пароль шифрования (лаб.): `lab4_sem6_wal_pass.txt` → в образе `/etc/postgresql/lab4_sem6_wal_pass.txt`.
